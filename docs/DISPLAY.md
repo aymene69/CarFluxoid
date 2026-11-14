@@ -10,3 +10,9 @@ The local page exposes independent controls:
 Scale and CarPlay options apply on reconnection. Resolution is selected at Android Auto startup and needs a dongle restart. H.264 bitrate control is not implemented. Changing interface scale alone does not guarantee lower load or better audio.
 
 The code announces CarFluxoid for the accessory name, model and manufacturer. An old CarPlay profile name saved on the iPhone may remain until that old vehicle entry is forgotten once in Settings > General > CarPlay.
+
+## DHU resolution and interface scale
+
+Use `resolution = 800x480`, `1280x720` or `1920x1080` for the documented DHU landscape formats. A request such as `400x240` is rejected by DHU and falls back to 800x480. To change icon/text sizing at the same pixel resolution, use the CarFluxoid interface-scale setting instead. This does not change the video format advertised by DHU.
+
+Reference: https://developer.android.com/training/cars/testing/dhu
