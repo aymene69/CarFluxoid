@@ -7,6 +7,7 @@ while [ "$i" -lt 90 ]; do
  i=$((i+1));sleep 1
 done
 [ "$i" -lt 90 ] || { echo 'AA_BOOT_FAILED: beta radio/gadget initialization incomplete';exit 1; }
+export AA_DIAGNOSTIC=${AA_DIAGNOSTIC:-0}
 work=/tmp/aa-autoboot
 mkdir -p "$work"
 for n in catplay-aa-rx aa-phone-v821 aa_bulk.ko;do
@@ -16,8 +17,9 @@ cp /usr/lib/aa-bridge/test-cert.pem /usr/lib/aa-bridge/test-key.pem /usr/lib/aa-
 chmod 700 "$work" "$work/catplay-aa-rx" "$work/aa-phone-v821"
 chmod 600 "$work/test-key.pem" "$work/wifi-env.sh"
 for screen in /usr/lib/aa-bridge/attente-*.h264; do
- [ ! -f "$screen" ] || cp "$screen" "$work/"
+ [ ! -f "$screen" ] || ln -sf "$screen" "$work/"
 done
+setsid /bin/sh /usr/lib/aa-bridge/log-maintenance.sh </dev/null >/dev/null 2>&1 &
 setsid /bin/sh /usr/lib/aa-bridge/web-service.sh </dev/null >/dev/null 2>&1 &
 echo 'AA_BOOT_READY: launching bridge; beta kernel unchanged'
 exec /bin/sh "$work/usb-test.sh"

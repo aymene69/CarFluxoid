@@ -181,7 +181,7 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
 }
 async fn run()->Result<(),Box<dyn std::error::Error>>{
  eprintln!("CP_BOOT 3: initializing logger");
- env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+ env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(if std::env::var("AA_DIAGNOSTIC").as_deref()==Ok("1"){"info"}else{"warn"})).init();
  eprintln!("CP_BOOT 4: logger ready");
  let args:Vec<_>=std::env::args().collect();
  if args.get(1).map(String::as_str)==Some("--self-test"){eprintln!("CP_SELF_TEST_OK");return Ok(());}

@@ -28,6 +28,8 @@
 
 #define CAP 65536
 static int buffered_test;
+static int diagnostic;
+#define TRACE(...) do { if(diagnostic) fprintf(stderr,__VA_ARGS__); } while(0)
 static int fd, out_fd, usb_mode, ep0=-1, handshake=1, rx_ch, tx_ch, tx_flags=11;
 static unsigned char usb_buffer[CAP];
 static size_t usb_pos,usb_len;
@@ -74,7 +76,7 @@ static int receive(int *ch,int *flags,unsigned char *p,size_t *n){
  /* This first prototype accepts complete AA messages only. */
  if((*flags&3)!=3){fprintf(stderr,"Fragmented input unsupported: flags=%02x\n",*flags);return -1;}
  int result=all(0,p,*n);if(!result)capture_frame(*ch,*flags,p,*n);
- if(!handshake&&result==0){
+ if(diagnostic&&!handshake&&result==0){
   static unsigned sequence;static uint32_t previous;uint32_t hash=2166136261u;
   for(size_t k=0;k<*n;k++)hash=(hash^p[k])*16777619u;
   fprintf(stderr,"AA RX frame=%u ch=%d flags=%02x bytes=%zu fingerprint=%08x%s TLShead=",++sequence,*ch,*flags,*n,hash,hash==previous?" REPEATED":"");
@@ -469,8 +471,12 @@ int main(int argc,char **argv){
   syscall(SYS_io_destroy,ctx);fprintf(stderr,"AIO_AVAILABLE\n");return 0;
  }
  if(argc!=6){fprintf(stderr,"Usage: %s HOST PORT CERT KEY MIRE.h264\n       %s --ffs MOUNT CERT KEY MIRE.h264\n",argv[0],argv[0]);return 2;}
- raw_capture=fopen("usb-rx.bin","wb");frame_capture=fopen("aa-rx.bin","wb");
- if(!raw_capture||!frame_capture)die("Diagnostic capture");
+ diagnostic=getenv("AA_DIAGNOSTIC")&&!strcmp(getenv("AA_DIAGNOSTIC"),"1");
+ if(diagnostic){
+  raw_capture=fopen("usb-rx.bin","wb");frame_capture=fopen("aa-rx.bin","wb");
+  if(!raw_capture||!frame_capture)die("Diagnostic capture");
+ }
+ fprintf(stderr,"AA_MODE=%s\n",diagnostic?"diagnostic":"production");
  signal(SIGPIPE,SIG_IGN);
  if(getenv("AA_VIDEO_SOCKET"))open_live_input(getenv("AA_VIDEO_SOCKET"));
  struct sigaction action;memset(&action,0,sizeof action);action.sa_handler=interrupted;sigemptyset(&action.sa_mask);
@@ -511,7 +517,7 @@ int main(int argc,char **argv){
   }
   while(audio_ready&&audio_unacked<audio_max_unacked){unsigned char pcm[8192],data[8200];ssize_t count=recv(audio_fd,pcm,sizeof pcm,MSG_DONTWAIT);
    if(count<=0)break;
-   if(count>0){if(!audio_epoch)audio_epoch=now_us()-start;uint64_t ts=audio_epoch+audio_samples*1000000ULL/48000;audio_samples+=(uint64_t)count/4;for(int k=7;k>=0;k--){data[k]=ts;ts>>=8;}memcpy(data+8,pcm,(size_t)count);send_msg(audio_channel,11,0,data,(size_t)count+8);audio_unacked++;fprintf(stderr,"AUDIO sent bytes=%zd\n",count);}
+   if(count>0){if(!audio_epoch)audio_epoch=now_us()-start;uint64_t ts=audio_epoch+audio_samples*1000000ULL/48000;audio_samples+=(uint64_t)count/4;for(int k=7;k>=0;k--){data[k]=ts;ts>>=8;}memcpy(data+8,pcm,(size_t)count);send_msg(audio_channel,11,0,data,(size_t)count+8);audio_unacked++;TRACE("AUDIO sent bytes=%zd\n",count);}
   }
   if(running&&focused&&unacked<max_unacked&&now_us()>=next){
    size_t length=vn;uint64_t stamp=now_us()-start;
@@ -521,11 +527,11 @@ int main(int argc,char **argv){
     send_video(video_ch,live_listener<0?video:live_buf+12,length,stamp);
     if(live_listener>=0)live_used=0;
     unacked++;frames++;next=now_us()+(live_listener<0?500000:0);
-    fprintf(stderr,"VIDEO frame=%d bytes=%zu unacked=%d source=%s\n",frames,length,unacked,live_listener<0?"test":"CarPlay");
+    TRACE("VIDEO frame=%d bytes=%zu unacked=%d source=%s\n",frames,length,unacked,live_listener<0?"test":"CarPlay");
    }else if(!have_carplay_video&&waiting_video&&waiting_size){
     send_video(video_ch,waiting_video,waiting_size,now_us()-start);
     unacked++;frames++;next=now_us()+1000000;
-    fprintf(stderr,"VIDEO frame=%d bytes=%zu source=Bluetooth-waiting-screen\n",frames,waiting_size);
+    TRACE("VIDEO frame=%d bytes=%zu source=Bluetooth-waiting-screen\n",frames,waiting_size);
    }
   }
   fd_set set;FD_ZERO(&set);FD_SET(fd,&set);struct timeval wait={0,100000};
@@ -549,9 +555,9 @@ int main(int argc,char **argv){
    }
    at=0;left=incoming_len;
   }
-  fprintf(stderr,"TLS_EXPECTED_RX_COUNTER=");for(int k=0;k<8;k++)fprintf(stderr,"%02x",ssl.in_ctr[k]);fprintf(stderr,"\n");
+  if(diagnostic){fprintf(stderr,"TLS_EXPECTED_RX_COUNTER=");for(int k=0;k<8;k++)fprintf(stderr,"%02x",ssl.in_ctr[k]);fprintf(stderr,"\n");}
   int r=mbedtls_ssl_read(&ssl,plain,sizeof plain);if(r==0)break;if(r==MBEDTLS_ERR_SSL_WANT_READ||r==MBEDTLS_ERR_SSL_WANT_WRITE)continue;check(r,"TLS read");if(r<2)continue;
-  int id=(plain[0]<<8)|plain[1];const unsigned char *body=plain+2;size_t len=(size_t)r-2;fprintf(stderr,"RX ch=%d msg=%04x bytes=%zu\n",rx_ch,id,len);
+  int id=(plain[0]<<8)|plain[1];const unsigned char *body=plain+2;size_t len=(size_t)r-2;TRACE("RX ch=%d msg=%04x bytes=%zu\n",rx_ch,id,len);
   if(rx_ch==0&&id==4){unsigned char name[]={0x22,10,'C','a','r','F','l','u','x','o','i','d'};send_msg(0,11,5,name,sizeof name);}
   else if(rx_ch==0&&id==6){input_channel=find_input(body,len);video_ch=find_video(body,len);audio_channel=live_listener>=0?find_media_audio(body,len):-1;mic_channel=live_listener>=0?find_microphone(body,len):-1;if(live_listener>=0&&selected_codec!=3){fprintf(stderr,"Live CarPlay requires an H264 receiver\n");return 1;}if(video_ch<0){fprintf(stderr,"No H264 video service\n");return 1;}fprintf(stderr,"Selected video service=%d codec=%d AA_DISPLAY=%ux%u\n",video_ch,selected_codec,display_width,display_height);
  load_waiting_video();

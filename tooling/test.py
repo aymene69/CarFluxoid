@@ -1,6 +1,6 @@
 """Run native protocol tests plus the production RV32 settings and recorder tests."""
 from pathlib import Path
-import subprocess,os,json,shutil
+import subprocess,os,json,shutil,tempfile
 root=Path('/input');build=Path('/build/aa');host=build/'mbedtls-host'
 if not host.exists():shutil.copytree(build/'mbedtls-rv',host,ignore=shutil.ignore_patterns('*.o','*.a','*.so'))
 subprocess.run(['make','-C',str(host),'-j4','lib'],check=True,stdout=subprocess.DEVNULL)
@@ -23,3 +23,12 @@ if not executables:raise RuntimeError('No RV32 test executable found')
 for executable in executables:subprocess.run(['qemu-riscv32','-L','/build/firmware-root',executable,'-Z','unstable-options','--force-run-in-process','--test-threads=1'],check=True,env={**env,'RUSTC_BOOTSTRAP':'1'})
 subprocess.run(['python3','-m','unittest','discover','-s','/input/tests','-v'],check=True)
 print('Protocol, RV32 runtime, settings and offline image/flash-tool tests passed.')
+
+# Exercise production/diagnostic startup in the actual RV32 executable.
+for mode in ['0','1']:
+ with tempfile.TemporaryDirectory() as directory:
+  result=subprocess.run(['qemu-riscv32','-L','/build/firmware-root','/input/local/artifacts/aa-phone-v821','127.0.0.1','1','missing-cert','missing-key','missing-video'],cwd=directory,env={**os.environ,'AA_DIAGNOSTIC':mode},capture_output=True,text=True)
+  assert result.returncode==1 and 'Video file' in result.stderr,result.stderr
+  for name in ['usb-rx.bin','aa-rx.bin']:
+   assert (Path(directory)/name).exists()==(mode=='1'),(mode,name)
+print('RV32 production mode creates no capture files; diagnostic opt-in verified.')

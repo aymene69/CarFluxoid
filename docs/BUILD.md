@@ -35,3 +35,19 @@ Do not commit `local/`, identity files or composed device images. They are ignor
 `test` runs native C protocol/selection/EOF tests, the production RV32 settings executable under QEMU and the firmware libc, RV32 recorder/scale/socket tests, and simulated image/flash/readback tests. GitHub source checks run automatically; a separate manually dispatched workflow runs the full SDK/build/test chain without touching hardware.
 
 A successful offline build or simulated flash is not a hardware acceptance test. Consult [VALIDATION.md](VALIDATION.md) for what has actually been exercised.
+
+### Production logging
+
+Autonomous firmware uses production logging by default. Android Auto packet,
+TLS-counter, per-audio-block and per-video-frame traces are disabled, as are
+`usb-rx.bin` and `aa-rx.bin` captures. CarPlay keeps warnings and errors; Android
+Auto keeps connection transitions and errors. Waiting videos are symlinked from
+the read-only firmware rather than copied into RAM.
+
+For a manual diagnostic session, export `AA_DIAGNOSTIC=1` before starting the
+bridge; `RUST_LOG=info` (or `debug`) can independently override Rust logging.
+Diagnostic captures can grow without limit and should only be used temporarily.
+The autonomous log maintenance process checks the four service logs every ten
+seconds and truncates files exceeding 64 KiB in place. This is a periodic limit,
+not a strict byte ceiling: output between checks can exceed the threshold.
+The web server and all radio, audio, microphone and touch services remain active.

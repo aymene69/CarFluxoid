@@ -11,7 +11,7 @@ for n in ['aa-phone-v821','catplay-aa-rx','aa_bulk.ko']:
  data=(out/n).read_bytes()
  if data[:4]!=b'\x7fELF' or data[4]!=1 or int.from_bytes(data[18:20],'little')!=243:raise RuntimeError(n+': expected RV32 ELF')
  (dest/(n+'.gz')).write_bytes(gzip.compress(data,9,mtime=0))
-for n in ['boot.sh','usb-test.sh','web-service.sh']:shutil.copy2(ROOT/'deploy'/n,dest/n)
+for n in ['boot.sh','usb-test.sh','web-service.sh','log-maintenance.sh']:shutil.copy2(ROOT/'deploy'/n,dest/n)
 shutil.copy2(ROOT/'deploy/wifi-env.sh.example',dest/'wifi-env.sh')
 shutil.copy2(ROOT/'assets/mire.h264',dest/'mire.h264')
 for p in (ROOT/'assets/waiting').glob('*.h264'):shutil.copy2(p,dest/p.name)
