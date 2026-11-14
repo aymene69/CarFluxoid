@@ -475,7 +475,7 @@ int main(int argc,char **argv){
  if(getenv("AA_VIDEO_SOCKET"))open_live_input(getenv("AA_VIDEO_SOCKET"));
  struct sigaction action;memset(&action,0,sizeof action);action.sa_handler=interrupted;sigemptyset(&action.sa_mask);
  sigaction(SIGINT,&action,NULL);sigaction(SIGTERM,&action,NULL);sigaction(SIGALRM,&action,NULL);
- alarm(live_listener>=0?630:150);setvbuf(stderr,NULL,_IONBF,0);
+ if(!getenv("AA_AUTONOMOUS"))alarm(live_listener>=0?630:150);setvbuf(stderr,NULL,_IONBF,0);
  unsigned char video[15000];FILE *f=fopen(argv[5],"rb");if(!f)die("Video file");size_t vn=fread(video,1,sizeof video,f);if(!vn||!feof(f)){fprintf(stderr,"Test frame must be 1..14999 bytes\n");return 2;}fclose(f);
  int raw_mode=!strcmp(argv[1],"--raw");
  usb_mode=!strcmp(argv[1],"--ffs")||raw_mode;

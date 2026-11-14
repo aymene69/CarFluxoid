@@ -1,0 +1,2 @@
+# Kernel Module.symvers uses an empty final TSV namespace column.
+configs/beta-exports.symvers -whitespace

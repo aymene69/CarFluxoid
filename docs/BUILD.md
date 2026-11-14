@@ -1,38 +1,37 @@
-# Build environment
+# Reproducible build
 
-The current cross-build scripts are exported from the working development environment. They assume:
-
-- Linux, Clang/LLVM/LLD 19 and Rust with `rust-src` / build-std support.
-- RISC-V RV32GC, ilp32d, musl target and matching firmware runtime libraries.
-- A musl 1.2.5 CRT, MbedTLS build and OpenSSL static build under `/build/aa`.
-- D-Bus and Opus runtime libraries from the firmware, supplied locally under `/input/work/uconnect/dongle-root`.
-- This repository mounted read-only at `/input`, with build output under `/build`.
-- The exact beta kernel headers/build tree for compiling `aa_bulk.ko`.
-
-After preparing CatPlay with `scripts/prepare-catplay.sh`:
+The supported entry point is documented in [INSTALL.md](INSTALL.md). It does not require the author's old Docker container or workstation directories.
 
 ```sh
-sh /input/bridge-aa/build-v821.sh
-sh /input/bridge-aa/build-carplay-rx.sh
+.venv/bin/python carfluxoid.py fetch
+.venv/bin/python carfluxoid.py sdk
+.venv/bin/python carfluxoid.py build
+.venv/bin/python carfluxoid.py test
 ```
 
-These scripts do not download or bootstrap the SDK. Do not substitute a rebuilt kernel or arbitrary kernel module for the beta versions without validation. The working rootfs uses EROFS LZ4 with **4096-byte blocks**; an image built with 16 KiB blocks failed to boot on the device.
+## Locked inputs
 
-## Tests used during development
+`tooling/sources.lock.json` records source archive URLs/SHA-256, Rust 1.100.0, the Docker base image digest, the **issue 56 hstimer-off** beta image/kernel hash, the module configuration and reference exports. Cargo dependencies are locked separately. Every cached source is rechecked before use.
 
-C tests include `parser.c`, `microphone.c` and `video_config.c`. They include the production sender and link the host MbedTLS libraries. On a 64-bit Linux host, the legacy unused AIO branch needs the compile definition `SYS_io_pgetevents_time64=SYS_io_pgetevents`.
+The clean build constructs musl 1.2.5 headers/CRT, MbedTLS 2.28.10, OpenSSL 3.6.3, the native AA sender, the Rust CarPlay receiver and `aa_bulk.ko`. The SDK uses Clang/LLVM/LLD 19. The kernel header preparation uses pinned Linux 7.2.13 and the needed vendor public-header/RISC-V patches. The beta kernel itself is not replaced by a fresh kernel build.
 
-Rust unit tests are built for RV32 using build-std and run with QEMU and the firmware libc. This matters: native host tests did not reveal an RV32 metadata ABI crash. The settings HTTP test accepts `AA_WEB_TEST_COMMAND` to launch the real cross-built executable under QEMU, for example:
+`configs/beta-exports.symvers` is the reference kernel's generated export-name table, not a device identity. `CONFIG_MODVERSIONS` is disabled. The compiled gadget's executable section must match the hardware-tested reference hash before packaging, in addition to checking its architecture and kernel build inputs. This caught/guards kernel-profile drift without requiring an untested replacement kernel.
 
-```sh
-AA_WEB_TEST_COMMAND='qemu-riscv32 -L /input/work/uconnect/dongle-root /build/aa/carfluxoid-rx-microphone --web' \
-  python3 /input/bridge-aa/tests/test_web.py
-```
+## Outputs and local state
 
-The HTTP test binds port 80 in the isolated Linux build environment. It verifies consecutive writes, validation, server restart and persistence. Device certificates/private keys are unnecessary for these tests.
+- `local/downloads/`: checked source downloads.
+- Docker volume `carfluxoid-sdk`: generated SDK, source trees and compiler cache.
+- `local/base/`: checked, unpacked public beta and its reference manifest.
+- `local/tls/`: local reference or user-supplied AA TLS pair.
+- `local/artifacts/`: cross-built executables/module, EROFS root and manifest.
+- Per-device backup and composed images: wherever explicitly requested under `local/`.
 
-## Deployment templates
+The image builder retains all original beta files except `/usr/bin/catplay_c2a`, then adds `/usr/lib/aa-bridge`. It verifies EROFS **4096-byte blocks**, the 11 MiB partition limit, a full extraction/tree comparison and RV32 ELF architecture. Composition verifies the actual backup's supported kernel and preserves its boot/kernel/persist. Flash takes fresh backups and rebases persist onto the latest device bytes before writing.
 
-`deploy/` is not a flash installer. It expects previously prepared binaries, TLS test credentials, device identity, images and an initialized beta boot environment. Use `deploy/wifi-env.sh.example` as the credential-free starting point for `wifi-env.sh`; actual credentials belong in local configuration. The required test pattern is included as `assets/mire.h264`, and `deploy/catplay_c2a` is the startup wrapper. The existing receiver reads the actual firmware-generated Wi-Fi configuration before fallback values.
+Do not commit `local/`, identity files or composed device images. They are ignored. The project does not include someone's MFi private key, pairing database or SPI backup.
 
-Keep device-specific image building and backup/restore tooling outside Git until a reproducible, reviewed packaging flow is available.
+## Checks
+
+`test` runs native C protocol/selection/EOF tests, the production RV32 settings executable under QEMU and the firmware libc, RV32 recorder/scale/socket tests, and simulated image/flash/readback tests. GitHub source checks run automatically; a separate manually dispatched workflow runs the full SDK/build/test chain without touching hardware.
+
+A successful offline build or simulated flash is not a hardware acceptance test. Consult [VALIDATION.md](VALIDATION.md) for what has actually been exercised.

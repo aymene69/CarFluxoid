@@ -1,0 +1,19 @@
+name: Full reproducible build (no hardware writes)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+      - run: .venv/bin/python carfluxoid.py fetch
+      - run: .venv/bin/python carfluxoid.py sdk
+      - run: .venv/bin/python carfluxoid.py build
+      - run: .venv/bin/python carfluxoid.py test
+      # Deliberately do not upload local/ or an image containing local identities.

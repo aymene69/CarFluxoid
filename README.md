@@ -22,7 +22,9 @@ The code also includes a microphone return path, persistent pairing, a local set
 - `bridge-aa/tests`: protocol, settings and transport tests.
 - `catplay`: upstream CatPlay submodule pinned to the tested source revision.
 - `patches/catplay.patch`: local CatPlay changes, including the RV32 filesystem workaround and accessory identity.
-- `deploy`: bootstrap templates from the autonomous prototype.
+- `deploy`: bootstrap files automatically assembled into the rootfs.
+- `carfluxoid.py`: source fetch, build/test, device backup, compose, flash and recovery CLI.
+- `tooling`: source lock, Docker SDK bootstrap, packaging and device verification.
 - `assets/waiting`: the three CarFluxoid waiting screens, in PNG and ready-to-use H.264.
 
 ```sh
@@ -31,9 +33,9 @@ cd CarFluxoid
 ./scripts/prepare-catplay.sh
 ```
 
-See [build notes](docs/BUILD.md), [display settings](docs/DISPLAY.md), and the explicit [completeness audit and missing components](docs/REPRODUCIBILITY.md).
+Start with the complete [build, backup, install and recovery guide](docs/INSTALL.md). See also [build internals](docs/BUILD.md), [display settings](docs/DISPLAY.md) and [validation evidence](docs/VALIDATION.md).
 
-Firmware images, SPI backups, device identity certificates, keys, pairing databases, passwords and diagnostic captures are deliberately excluded. They must remain local. Existing build scripts expect a prepared Linux SDK; this repository does not yet provide a turnkey firmware builder or installer.
+Firmware images, SPI backups, device identity certificates, keys, pairing databases, passwords and diagnostic captures are deliberately excluded. They must remain local. The repository now bootstraps its own Docker SDK and provides per-device image composition, verified flashing and recovery commands for the supported hardware profile. A full fresh-factory-device acceptance test is still pending; see the validation record.
 
 ## License and attribution
 
