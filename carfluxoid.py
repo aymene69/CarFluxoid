@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CarFluxoid build/install entry point. Hardware writes occur only in flash/restore/base-install commands."""
 from pathlib import Path
-import argparse,subprocess,sys,json,os,shutil,tarfile,urllib.request,hashlib,time
+import argparse,subprocess,sys,json,os,shutil,tarfile,urllib.request,hashlib,time,uuid
 ROOT=Path(__file__).resolve().parent;sys.path.insert(0,str(ROOT/'tooling'))
 from fetch import fetch,sha
 from device import Fel,compose,inspect,private_dir,write_private,ssh_connect,remote,SIZE,START,END
@@ -28,17 +28,18 @@ def tls():
  print('Local reference TLS identity ready. Compatibility and expiry are receiver-dependent.')
 def backup_ssh(host,path):
  path=Path(path);t=ssh_connect(host)
+ temporary="/tmp/carfluxoid-backup-"+uuid.uuid4().hex+".bin"
  try:
   identity=remote(t,'uname -a; cat /proc/mtd; cat /proc/cmdline')
   if 'riscv32' not in identity or 'v821b-rtl8733bs' not in identity or 'root=/dev/initrd' in identity:raise RuntimeError('Expected normal V821 RTL8733BS beta, not recovery/other hardware')
-  remote(t,'carlinkit_otalib backup /tmp/carfluxoid-backup.bin',120)
+  remote(t,'carlinkit_otalib backup '+temporary,120)
   import paramiko
   with paramiko.SFTPClient.from_transport(t) as s:
-   with s.open('/tmp/carfluxoid-backup.bin','rb') as f:first=f.read()
-   with s.open('/tmp/carfluxoid-backup.bin','rb') as f:second=f.read()
-   s.remove('/tmp/carfluxoid-backup.bin')
+   with s.open(temporary,'rb') as f:first=f.read()
+   with s.open(temporary,'rb') as f:second=f.read()
   if len(first)!=SIZE or first!=second:raise RuntimeError('Backup size/read mismatch')
   inspect(first);write_private(path,first);write_private(Path(str(path)+'.verification'),second)
+  with paramiko.SFTPClient.from_transport(t) as s:s.remove(temporary)
   print('Two complete matching backup reads:',hashlib.sha256(first).hexdigest());return first
  finally:t.close()
 def flash_ssh(host,image,out):
