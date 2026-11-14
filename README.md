@@ -31,7 +31,7 @@ cd CarFluxoid
 ./scripts/prepare-catplay.sh
 ```
 
-See [build notes](docs/BUILD.md) and [display settings](docs/DISPLAY.md).
+See [build notes](docs/BUILD.md), [display settings](docs/DISPLAY.md), and the explicit [completeness audit and missing components](docs/REPRODUCIBILITY.md).
 
 Firmware images, SPI backups, device identity certificates, keys, pairing databases, passwords and diagnostic captures are deliberately excluded. They must remain local. Existing build scripts expect a prepared Linux SDK; this repository does not yet provide a turnkey firmware builder or installer.
 

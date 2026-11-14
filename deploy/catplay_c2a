@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/lib/aa-bridge/boot.sh >>/var/log/aa-bridge-boot.log 2>&1

@@ -1,0 +1,3 @@
+# Fallback only. The receiver reads the actual SSID/password from the firmware.
+SSID=CarFluxoid_AP
+# For a different environment, set AA_WIFI_PASSWORD locally; never commit it.

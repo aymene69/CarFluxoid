@@ -33,6 +33,6 @@ The HTTP test binds port 80 in the isolated Linux build environment. It verifies
 
 ## Deployment templates
 
-`deploy/` is not a flash installer. It expects previously prepared binaries, TLS test credentials, device identity, images and an initialized beta boot environment. `wifi-env.sh` is intentionally absent: credentials belong in local configuration. The existing receiver reads the actual firmware-generated Wi-Fi configuration before fallback values.
+`deploy/` is not a flash installer. It expects previously prepared binaries, TLS test credentials, device identity, images and an initialized beta boot environment. Use `deploy/wifi-env.sh.example` as the credential-free starting point for `wifi-env.sh`; actual credentials belong in local configuration. The required test pattern is included as `assets/mire.h264`, and `deploy/catplay_c2a` is the startup wrapper. The existing receiver reads the actual firmware-generated Wi-Fi configuration before fallback values.
 
 Keep device-specific image building and backup/restore tooling outside Git until a reproducible, reviewed packaging flow is available.
