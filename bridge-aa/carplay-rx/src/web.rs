@@ -1,0 +1,77 @@
+use std::{io::{Read,Write},net::{TcpListener,TcpStream},path::PathBuf,time::Duration};
+const HTML:&str=include_str!("../assets/settings.html");
+fn dir()->PathBuf{std::env::var_os("AA_SETTINGS_DIR").map(PathBuf::from).unwrap_or_else(||"/persist/aa-settings".into())}
+pub fn identity()->(String,Vec<u8>,u32,u32){
+ let name=std::fs::read_to_string(dir().join("name.txt")).ok().filter(|s|valid_name(s)).unwrap_or_else(||"Car".into());
+ let logo=std::fs::read(dir().join("logo.png")).ok().filter(|b|dimensions(b).is_some()).unwrap_or_else(||include_bytes!("../assets/car.png").to_vec());
+ let (w,h)=dimensions(&logo).unwrap();(name,logo,w,h)
+}
+#[derive(Clone,Debug)]
+pub struct Options {pub scale_percent:u32,pub max_resolution:u32,pub right_bar:bool,pub assist_buttons:bool,pub return_button:bool,pub touch:bool,pub fps:u8,pub theme:String}
+impl Default for Options {fn default()->Self{Self{scale_percent:100,max_resolution:0,right_bar:false,assist_buttons:true,return_button:true,touch:true,fps:30,theme:"auto".into()}}}
+impl Options{pub fn physical_size(&self,w:u16,h:u16)->(u32,u32){let width=16000/self.scale_percent;(width,(width*h as u32/w.max(1) as u32).max(1))}}
+fn parse_options(text:&str)->Result<Options,()>{let mut o=Options::default();for line in text.lines(){if line.trim().is_empty(){continue;}let (key,value)=line.split_once('=').ok_or(())?;match(key.trim(),value.trim()){
+ ("scale_percent",v) if ["75","85","100","115","125","150"].contains(&v)=>o.scale_percent=v.parse().map_err(|_|())?,
+ ("max_resolution",v) if ["0","480","720","1080"].contains(&v)=>o.max_resolution=v.parse().map_err(|_|())?,
+ ("sidebar","left")=>o.right_bar=false,("sidebar","right")=>o.right_bar=true,
+ ("return_button","true")=>o.return_button=true,("return_button","false")=>o.return_button=false,
+ ("touch","true")=>o.touch=true,("touch","false")=>o.touch=false,
+ ("assist_buttons","true")=>o.assist_buttons=true,("assist_buttons","false")=>o.assist_buttons=false,
+ ("fps",v) if ["10","15","20","30"].contains(&v)=>o.fps=v.parse().map_err(|_|())?,
+ ("theme",v) if ["auto","day","night"].contains(&v)=>o.theme=v.into(),_=>return Err(())
+ }}Ok(o)}
+pub fn options()->Options{std::fs::read_to_string(dir().join("options.txt")).ok().and_then(|s|parse_options(&s).ok()).unwrap_or_default()}
+fn options_json()->String{let o=options();format!(r#"{{"sidebar":"{}","return_button":{},"touch":true,"fps":{},"theme":"{}","assist_buttons":{},"max_resolution":{},"scale_percent":{}}}"#,if o.right_bar{"right"}else{"left"},o.return_button,o.fps,o.theme,o.assist_buttons,o.max_resolution,o.scale_percent)}
+fn dimensions(b:&[u8])->Option<(u32,u32)>{
+ if b.len()<33||b.len()>128*1024||&b[..8]!=b"\x89PNG\r\n\x1a\n"||&b[12..16]!=b"IHDR"{return None;}
+ let w=u32::from_be_bytes(b[16..20].try_into().ok()?);let h=u32::from_be_bytes(b[20..24].try_into().ok()?);
+ if w!=h||!(64..=512).contains(&w){return None;}Some((w,h))
+}
+fn valid_name(s:&str)->bool{!s.trim().is_empty()&&s.chars().count()<=32&&!s.chars().any(char::is_control)}
+fn save(name:&str,data:&[u8])->std::io::Result<()>{
+ use std::os::unix::fs::{OpenOptionsExt,PermissionsExt};
+ let d=dir();match std::fs::create_dir(&d){Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>{},Err(e)=>return Err(e)};std::fs::set_permissions(&d,std::fs::Permissions::from_mode(0o700))?;
+ let temp=d.join(format!(".{name}.tmp"));
+ let result=(||{let mut f=std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&temp)?;f.write_all(data)?;f.sync_all()?;std::fs::rename(&temp,d.join(name))})();
+ if result.is_err(){let _=std::fs::remove_file(temp);}result
+}
+fn reply(s:&mut TcpStream,code:&str,mime:&str,data:&[u8]){
+ let header=format!("HTTP/1.1 {code}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n",data.len());let _=s.write_all(header.as_bytes());let _=s.write_all(data);
+}
+fn handle(mut s:TcpStream)->std::io::Result<()>{
+ s.set_read_timeout(Some(Duration::from_secs(15)))?;s.set_write_timeout(Some(Duration::from_secs(15)))?;
+ let mut data=Vec::new();let mut block=[0;4096];let end;
+ loop{let n=s.read(&mut block)?;if n==0{return Ok(());}data.extend_from_slice(&block[..n]);if let Some(i)=data.windows(4).position(|w|w==b"\r\n\r\n"){end=i+4;break;}if data.len()>8192{return Ok(());}}
+ let header=String::from_utf8_lossy(&data[..end]).to_string();let mut first=header.lines().next().unwrap_or("").split_whitespace();let method=first.next().unwrap_or("");let path=first.next().unwrap_or("").split('?').next().unwrap_or("");
+ if method!="GET" {
+  let origin=header.lines().filter_map(|l|l.split_once(':')).find(|(k,_)|k.eq_ignore_ascii_case("origin")).map(|(_,v)|v.trim());
+  let host=header.lines().filter_map(|l|l.split_once(':')).find(|(k,_)|k.eq_ignore_ascii_case("host")).map(|(_,v)|v.trim()).unwrap_or("");
+  if origin.is_some_and(|o|o!=format!("http://{host}")){reply(&mut s,"403 Forbidden","text/plain",b"Origin refused");return Ok(());}
+ }
+ let size=header.lines().filter_map(|l|l.split_once(':')).find(|(k,_)|k.eq_ignore_ascii_case("content-length")).and_then(|(_,v)|v.trim().parse::<usize>().ok()).unwrap_or(0);
+ if size>128*1024{reply(&mut s,"413 Payload Too Large","text/plain",b"PNG: 128 Kio maximum");return Ok(());}
+ while data.len()-end<size{let n=s.read(&mut block)?;if n==0{return Ok(());}data.extend_from_slice(&block[..n]);}
+ let body=&data[end..end+size];
+ match(method,path){
+  ("GET","/health")=>reply(&mut s,"200 OK","text/plain",b"CarFluxoid settings ready"),
+  ("GET","/")=>reply(&mut s,"200 OK","text/html; charset=utf-8",HTML.as_bytes()),
+  ("GET","/name")=>reply(&mut s,"200 OK","text/plain; charset=utf-8",identity().0.as_bytes()),
+  ("GET","/options")=>reply(&mut s,"200 OK","application/json",options_json().as_bytes()),
+  ("PUT","/options")=>{
+   if body.len()>1024||std::str::from_utf8(body).ok().and_then(|s|parse_options(s).ok()).is_none(){reply(&mut s,"400 Bad Request","text/plain",b"Options invalides");}
+   else{match save("options.txt",body){Ok(())=>reply(&mut s,"200 OK","text/plain",b"OK"),Err(e)=>{eprintln!("WEB_SETTINGS_SAVE options: {e}");reply(&mut s,"507 Insufficient Storage","text/plain",b"Enregistrement impossible")}}}
+  },
+  ("GET","/logo.png")=>reply(&mut s,"200 OK","image/png",&identity().1),
+  ("PUT","/name")|("PUT","/logo.png")=>{
+   let valid=if path=="/name"{std::str::from_utf8(body).map(valid_name).unwrap_or(false)}else{dimensions(body).is_some()};
+   if !valid{reply(&mut s,"400 Bad Request","text/plain; charset=utf-8",b"Nom: 1 a 32 caracteres. Logo: PNG carre 64 a 512 pixels, 128 Kio maximum.");}
+   else{match save(if path=="/name"{"name.txt"}else{"logo.png"},body){Ok(())=>reply(&mut s,"200 OK","text/plain",b"OK"),Err(e)=>{eprintln!("WEB_SETTINGS_SAVE {path}: {e}");reply(&mut s,"507 Insufficient Storage","text/plain",b"Ecriture impossible; ancien reglage conserve")}}}
+  },
+  ("POST","/reset")=>{let _=std::fs::remove_file(dir().join("logo.png"));let _=std::fs::remove_file(dir().join("name.txt"));let _=std::fs::remove_file(dir().join("options.txt"));reply(&mut s,"200 OK","text/plain",b"OK");},
+  _=>reply(&mut s,"404 Not Found","text/plain",b"Not found")
+ }Ok(())
+}
+pub fn serve()->std::io::Result<()>{let listener=TcpListener::bind("0.0.0.0:80")?;eprintln!("WEB_SETTINGS_READY http://192.168.50.2");for stream in listener.incoming(){match stream{Ok(s)=>{if let Err(e)=handle(s){eprintln!("WEB_SETTINGS_REQUEST: {e}");}},Err(e)=>{eprintln!("WEB_SETTINGS_ACCEPT: {e}");std::thread::sleep(Duration::from_millis(100));}}}Ok(())}
+#[cfg(test)]mod tests{use super::*;#[test]fn png_and_names(){assert!(valid_name("Peugeot"));assert!(!valid_name("\n"));assert!(!valid_name(&"x".repeat(33)));assert_eq!(dimensions(include_bytes!("../assets/car.png")),Some((256,256)));assert!(dimensions(b"bad").is_none());}}
+
+#[cfg(test)]mod scale_tests{use super::*;#[test]fn scale_preserves_default_and_aspect(){for(percent,width)in[(75,213),(100,160),(125,128),(150,106)]{let o=parse_options(&format!("scale_percent={percent}")).unwrap();assert_eq!(o.physical_size(800,480),(width,width*480/800));}assert!(parse_options("scale_percent=0").is_err());assert!(parse_options("scale_percent=999").is_err());}}

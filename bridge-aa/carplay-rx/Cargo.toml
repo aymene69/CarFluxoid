@@ -1,0 +1,17 @@
+[package]
+name="catplay-aa-rx"
+version="0.1.0"
+edition="2024"
+[dependencies]
+catplay_carplay={path="../../catplay/carplay/catplay_carplay",default-features=false}
+catplay_carplay_rx_gadget={path="../../catplay/catplay_carplay_rx_gadget"}
+catplay_hap={path="../../catplay/core/catplay_hap"}
+catplay_mfi={path="../../catplay/core/catplay_mfi",features=["local"]}
+catplay_util={path="../../catplay/core/catplay_util"}
+async-trait="0.1.89"
+tokio={version="1",features=["rt","macros","signal","time","net","io-util","sync"]}
+log="0.4"
+env_logger="0.11"
+openssl={version="0.10",features=["vendored"]}
+catplay_bt={path="../../catplay/bluetooth/catplay_bt"}
+catplay_hid={path="../../catplay/carplay/catplay_hid"}

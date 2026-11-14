@@ -1,0 +1,134 @@
+diff --git a/catplay_carplay_rx_gadget/src/server_wireless.rs b/catplay_carplay_rx_gadget/src/server_wireless.rs
+index fce10a4..4624000 100644
+--- a/catplay_carplay_rx_gadget/src/server_wireless.rs
++++ b/catplay_carplay_rx_gadget/src/server_wireless.rs
+@@ -331,6 +331,9 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayWirelessGadget<T> {
+             LocalState::StartingBluetooth { hci, mac } => {
+                 let mfi = self.mfi.clone();
+                 let identity = CarPlaySessionIdentity {
++                    name: self.name.clone(),
++                    model_identifier: self.name.clone(),
++                    manufacturer: self.name.clone(),
+                     display_name: self.name.clone(),
+                     ncm_iface: None,
+                     bt_mac: Some(*mac),
+diff --git a/core/catplay_hap/src/storage/storage_file.rs b/core/catplay_hap/src/storage/storage_file.rs
+index f363433..96a8737 100644
+--- a/core/catplay_hap/src/storage/storage_file.rs
++++ b/core/catplay_hap/src/storage/storage_file.rs
+@@ -131,6 +131,27 @@ impl HomekitStorageFile {
+         }
+     }
+ 
++    /// Load using read(2) only, for RV32 systems with older musl metadata APIs.
++    pub fn file_without_metadata(file_path: &str) -> Result<HomekitStorageRef, HomekitStorageError> {
++        let mut file = match File::open(file_path) {
++            Ok(file) => file,
++            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::random_identity(Some(file_path))),
++            Err(e) => return Err(e.into()),
++        };
++        let mut bytes = Vec::new();
++        let mut chunk = [0u8; 4096];
++        loop {
++            let n = file.read(&mut chunk)?;
++            if n == 0 { break; }
++            if bytes.len() + n > 1024 * 1024 { return Err(io::Error::other("HomeKit database exceeds limit").into()); }
++            bytes.extend_from_slice(&chunk[..n]);
++        }
++        let mut data: HomekitStorageFile = postcard::from_bytes(&bytes).map_err(|e| io::Error::other(format!("{e}")))?;
++        data.keypair = Some(Arc::new(Ed25519KeyPair::from_pkcs8(&data.keypair_pkcs8).map_err(|e| io::Error::other(format!("{e}")))?));
++        data.file_path = Some(file_path.into());
++        Ok(Arc::new(data))
++    }
++
+     pub fn file_try(file_path: &str) -> Result<HomekitStorageRef, HomekitStorageError> {
+         let path = Path::new(&file_path);
+         if !path.exists() || path.metadata()?.size() == 0 {
+diff --git a/core/catplay_iap2_link/src/link_layer.rs b/core/catplay_iap2_link/src/link_layer.rs
+index 99bf211..01b18fa 100644
+--- a/core/catplay_iap2_link/src/link_layer.rs
++++ b/core/catplay_iap2_link/src/link_layer.rs
+@@ -636,11 +636,19 @@ impl LinkLayer {
+     fn next_payload(&mut self) -> Option<(SessionType, Vec<u8>)> {
+         let max_payload_len = (self.peer_lsp.max_len as usize).saturating_sub(Packet::PACKET_OVERHEAD);
+ 
+-        if let Some(v) = self.csm.dequeue_tx(max_payload_len) {
++        // A peer may omit optional sessions. Do not consume their queues until
++        // there is a negotiated session ID to put on the wire.
++        if self.find_session_of_type(SessionType::Control).is_some()
++            && let Some(v) = self.csm.dequeue_tx(max_payload_len)
++        {
+             Some((SessionType::Control, v))
+-        } else if let Some(v) = self.files.dequeue_tx(max_payload_len) {
++        } else if self.find_session_of_type(SessionType::FileTransfer).is_some()
++            && let Some(v) = self.files.dequeue_tx(max_payload_len)
++        {
+             Some((SessionType::FileTransfer, v))
+-        } else if let Some(v) = self.ea.dequeue_tx(max_payload_len) {
++        } else if self.find_session_of_type(SessionType::ExternalAccessory).is_some()
++            && let Some(v) = self.ea.dequeue_tx(max_payload_len)
++        {
+             Some((SessionType::ExternalAccessory, v))
+         } else {
+             None
+diff --git a/core/catplay_iap2_link/src/link_layer/tests/mod.rs b/core/catplay_iap2_link/src/link_layer/tests/mod.rs
+index 4c3ced2..16fe282 100644
+--- a/core/catplay_iap2_link/src/link_layer/tests/mod.rs
++++ b/core/catplay_iap2_link/src/link_layer/tests/mod.rs
+@@ -1,5 +1,6 @@
+ mod downgrade;
+ mod shared;
++mod negotiated_sessions;
+ 
+ use self::shared::ClientsDuplexTest;
+ 
+diff --git a/core/catplay_iap2_link/src/link_layer/tests/negotiated_sessions.rs b/core/catplay_iap2_link/src/link_layer/tests/negotiated_sessions.rs
+new file mode 100644
+index 0000000..abfff73
+--- /dev/null
++++ b/core/catplay_iap2_link/src/link_layer/tests/negotiated_sessions.rs
+@@ -0,0 +1,44 @@
++use super::shared::ClientsDuplexTest;
++use crate::{LinkSession, LinkStatus, SessionType, files::FileTransferOutgoingSource};
++
++#[test]
++fn control_only_link_keeps_optional_payloads_queued_without_panicking() {
++    let mut test = ClientsDuplexTest::new();
++    test.sync();
++    // A head unit can negotiate control without the optional file/EA sessions.
++    test.client.local_lsp.sessions.retain(|s| s.session_type == SessionType::Control);
++    let file = test.client.files().reserve_file_tx().unwrap();
++    test.client.files().send_file(file, 0, &[], FileTransferOutgoingSource::VecData(vec![1, 2, 3]));
++    test.client.ea().enqueue_tx(vec![4, 5, 6]);
++    test.client.csm().enqueue_tx(vec![7, 8, 9]);
++    test.sync();
++    assert_eq!(test.client.status(), &LinkStatus::Writable);
++    assert_eq!(test.server_recv.pop_front(), Some(vec![7, 8, 9]));
++    assert!(test.client.files().has_tx_pending());
++    assert!(test.client.ea().has_tx_pending());
++}
++
++#[test]
++fn missing_control_session_does_not_consume_queued_identification() {
++    let mut test = ClientsDuplexTest::new();
++    test.sync();
++    test.client.local_lsp.sessions.clear();
++    test.client.csm().enqueue_tx(vec![7, 8, 9]);
++    test.client.reconcile(10);
++    assert!(test.client.csm().has_tx_pending());
++    assert!(test.client.retransmit_map.is_empty());
++}
++
++#[test]
++fn pending_ea_is_released_when_its_session_becomes_available() {
++    let mut test = ClientsDuplexTest::new();
++    test.sync();
++    let sessions = test.client.local_lsp.sessions.clone();
++    test.client.local_lsp.sessions.retain(|s| s.session_type == SessionType::Control);
++    test.client.ea().enqueue_tx(vec![4, 5, 6]);
++    assert!(test.client.next_payload().is_none());
++    assert!(test.client.ea().has_tx_pending());
++    test.client.local_lsp.sessions = sessions;
++    assert_eq!(test.client.next_payload(), Some((SessionType::ExternalAccessory, vec![4, 5, 6])));
++    assert!(!test.client.ea().has_tx_pending());
++}

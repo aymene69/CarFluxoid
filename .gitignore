@@ -1,0 +1,17 @@
+**/target/
+**/__pycache__/
+*.pyc
+.DS_Store
+/build/
+/work/
+/outputs/
+/local/
+*.c2aflash
+*.pem
+*.p7b
+*.pk8
+*.key
+*.log
+.env
+.env.*
+!*.example

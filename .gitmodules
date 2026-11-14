@@ -1,0 +1,3 @@
+[submodule "catplay"]
+	path = catplay
+	url = https://github.com/catplay-labs/catplay.git
