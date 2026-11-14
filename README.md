@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/carfluxoid-logo.png" alt="CarFluxoid" width="420">
+</p>
+
 # CarFluxoid
 
 Experimental bridge: **iPhone wireless CarPlay → Allwinner V821 dongle → wired Android Auto head unit**.
