@@ -23,6 +23,7 @@ The code also includes a microphone return path, persistent pairing, a local set
 - `catplay`: upstream CatPlay submodule pinned to the tested source revision.
 - `patches/catplay.patch`: local CatPlay changes, including the RV32 filesystem workaround and accessory identity.
 - `deploy`: bootstrap templates from the autonomous prototype.
+- `assets/waiting`: the three CarFluxoid waiting screens, in PNG and ready-to-use H.264.
 
 ```sh
 git clone --recurse-submodules https://github.com/aymene69/CarFluxoid.git
@@ -37,3 +38,7 @@ Firmware images, SPI backups, device identity certificates, keys, pairing databa
 ## License and attribution
 
 The bridge includes its existing GPL-3.0 license in `LICENSE`. Upstream dependencies and imported components retain their own licenses and notices. CatPlay is maintained at https://github.com/catplay-labs/catplay; local modifications are tracked separately rather than rewriting its upstream history.
+
+## Waiting screens
+
+Original artwork and matching H.264 files are in [`assets/waiting`](assets/waiting), for 800×480, 1280×720 and 1920×1080. The autonomous bootstrap expects these H.264 files beside the bridge payload. To regenerate them from the PNGs, install Pillow and FFmpeg, then run `python3 scripts/encode-waiting-screens.py`.
