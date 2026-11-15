@@ -7,6 +7,9 @@ while [ "$i" -lt 90 ]; do
  i=$((i+1));sleep 1
 done
 [ "$i" -lt 90 ] || { echo 'AA_BOOT_FAILED: beta radio/gadget initialization incomplete';exit 1; }
+export AA_CLOCK_SYNC=1
+/bin/sh /usr/lib/aa-bridge/clock-service.sh --restore
+setsid /bin/sh /usr/lib/aa-bridge/clock-service.sh </dev/null >>/var/log/aa-bridge-boot.log 2>&1 &
 export AA_DIAGNOSTIC=${AA_DIAGNOSTIC:-0}
 work=/tmp/aa-autoboot
 mkdir -p "$work"

@@ -51,3 +51,15 @@ The autonomous log maintenance process checks the four service logs every ten
 seconds and truncates files exceeding 64 KiB in place. This is a periodic limit,
 not a strict byte ceiling: output between checks can exceed the threshold.
 The web server and all radio, audio, microphone and touch services remain active.
+
+### Autonomous UTC clock
+
+At bridge startup, `clock-service.sh --restore` restores `/persist/aa-clock-epoch`
+only if it is newer than the current clock. This is a lower bound, not an RTC:
+powered-off time cannot be reconstructed from that file. The receiver advertises
+`DeviceTimeUpdate` reception over iAP2. With `AA_CLOCK_SYNC=1`, valid iPhone UTC
+seconds (2020–2099) are passed to the clock service, applied within two seconds
+and atomically saved to persist. Time-zone offsets are not added to UTC.
+This requires the connected iPhone to send that message; real-device receipt
+must be verified using `CLOCK_SYNCED` in the boot log. Before a phone connects,
+only the saved lower bound is available. Transport/media timers stay monotonic.

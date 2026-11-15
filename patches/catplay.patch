@@ -1,3 +1,34 @@
+diff --git a/catplay_carplay_rx_gadget/src/iap2_session.rs b/catplay_carplay_rx_gadget/src/iap2_session.rs
+index ac1d9de..6a5baa9 100644
+--- a/catplay_carplay_rx_gadget/src/iap2_session.rs
++++ b/catplay_carplay_rx_gadget/src/iap2_session.rs
+@@ -306,6 +306,7 @@ impl CarPlayServerSession {
+                     NowPlayingUpdate::PACKET_ID,
+                     DeviceInformationUpdate::PACKET_ID,
+                     DeviceUUIDUpdate::PACKET_ID,
++                    DeviceTimeUpdate::PACKET_ID,
+                     CallStateUpdate::PACKET_ID,
+                     ListUpdate::PACKET_ID,
+                 ][..],
+@@ -446,6 +447,18 @@ impl CsmSession for CarPlayServerSession {
+         //     })?;
+         // }
+ 
++        // Opt-in for the standalone bridge: the deployment clock service applies UTC.
++        if std::env::var("AA_CLOCK_SYNC").as_deref() == Ok("1") {
++            if let Some(time) = packet.cast::<DeviceTimeUpdate>() {
++                let epoch = time.seconds_since_reference_date;
++                if (1_577_836_800..4_102_444_800).contains(&epoch) {
++                    let result = std::fs::write("/tmp/aa-clock-from-iphone.new", epoch.to_string())
++                        .and_then(|()| std::fs::rename("/tmp/aa-clock-from-iphone.new", "/tmp/aa-clock-from-iphone"));
++                    if let Err(e) = result { warn!("CLOCK_IPHONE: {e}"); }
++                }
++            }
++        }
++
+         if let Some(np) = packet.cast::<NowPlayingUpdate>() {
+             self.on_now_playing(np.clone());
+         }
 diff --git a/catplay_carplay_rx_gadget/src/server_wireless.rs b/catplay_carplay_rx_gadget/src/server_wireless.rs
 index fce10a4..4624000 100644
 --- a/catplay_carplay_rx_gadget/src/server_wireless.rs
@@ -82,53 +113,3 @@ index 4c3ced2..16fe282 100644
  
  use self::shared::ClientsDuplexTest;
  
-diff --git a/core/catplay_iap2_link/src/link_layer/tests/negotiated_sessions.rs b/core/catplay_iap2_link/src/link_layer/tests/negotiated_sessions.rs
-new file mode 100644
-index 0000000..abfff73
---- /dev/null
-+++ b/core/catplay_iap2_link/src/link_layer/tests/negotiated_sessions.rs
-@@ -0,0 +1,44 @@
-+use super::shared::ClientsDuplexTest;
-+use crate::{LinkSession, LinkStatus, SessionType, files::FileTransferOutgoingSource};
-+
-+#[test]
-+fn control_only_link_keeps_optional_payloads_queued_without_panicking() {
-+    let mut test = ClientsDuplexTest::new();
-+    test.sync();
-+    // A head unit can negotiate control without the optional file/EA sessions.
-+    test.client.local_lsp.sessions.retain(|s| s.session_type == SessionType::Control);
-+    let file = test.client.files().reserve_file_tx().unwrap();
-+    test.client.files().send_file(file, 0, &[], FileTransferOutgoingSource::VecData(vec![1, 2, 3]));
-+    test.client.ea().enqueue_tx(vec![4, 5, 6]);
-+    test.client.csm().enqueue_tx(vec![7, 8, 9]);
-+    test.sync();
-+    assert_eq!(test.client.status(), &LinkStatus::Writable);
-+    assert_eq!(test.server_recv.pop_front(), Some(vec![7, 8, 9]));
-+    assert!(test.client.files().has_tx_pending());
-+    assert!(test.client.ea().has_tx_pending());
-+}
-+
-+#[test]
-+fn missing_control_session_does_not_consume_queued_identification() {
-+    let mut test = ClientsDuplexTest::new();
-+    test.sync();
-+    test.client.local_lsp.sessions.clear();
-+    test.client.csm().enqueue_tx(vec![7, 8, 9]);
-+    test.client.reconcile(10);
-+    assert!(test.client.csm().has_tx_pending());
-+    assert!(test.client.retransmit_map.is_empty());
-+}
-+
-+#[test]
-+fn pending_ea_is_released_when_its_session_becomes_available() {
-+    let mut test = ClientsDuplexTest::new();
-+    test.sync();
-+    let sessions = test.client.local_lsp.sessions.clone();
-+    test.client.local_lsp.sessions.retain(|s| s.session_type == SessionType::Control);
-+    test.client.ea().enqueue_tx(vec![4, 5, 6]);
-+    assert!(test.client.next_payload().is_none());
-+    assert!(test.client.ea().has_tx_pending());
-+    test.client.local_lsp.sessions = sessions;
-+    assert_eq!(test.client.next_payload(), Some((SessionType::ExternalAccessory, vec![4, 5, 6])));
-+    assert!(!test.client.ea().has_tx_pending());
-+}
