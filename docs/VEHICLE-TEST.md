@@ -45,3 +45,9 @@ candidate installation uses FEL, two reads, rootfs-only writing and full readbac
 The pinned kernel has `CONFIG_MODULE_UNLOAD` disabled. Once `aa_bulk` is loaded,
 a RAM module replacement cannot work; `rmmod` returns ENOSYS. Use a cold boot
 with the candidate image (FEL installation) rather than retrying module removal.
+
+Hardware observations (2026-11-15): DHU confirmed AOA protocol 1, accessory
+re-enumeration, USB attach and AA version 1.7. TLS/video are not yet validated
+on this candidate. A later boot restored the installed pre-fix sender and showed
+stale Unix sockets and absent org.bluez. The current image includes sender EOF
+and socket restart fixes plus bounded start attempts for an absent bluetoothd.

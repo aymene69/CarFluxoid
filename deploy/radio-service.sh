@@ -9,7 +9,14 @@ for n in certificate.p7b identity.pk8;do cp "/persist/$n" "$work/state/" || exit
 chmod 600 "$work/state/"*
 . "$work/wifi-env.sh"
 export AA_VIDEO_SOCKET="$work/video.sock"
+attempts=0
 while :;do
+ if ! pidof bluetoothd >/dev/null 2>&1 && [ "$attempts" -lt 3 ];then
+  attempts=$((attempts+1))
+  echo "AA_BLUEZ_START: daemon absent; attempt=$attempts"
+  /etc/init.d/bluetooth start || echo AA_BLUEZ_START_FAILED
+  sleep 3
+ fi
  echo 'AA_RADIO_START: independent wireless receiver'
  "$work/catplay-aa-rx" "$work/state" "$SSID" "$AA_VIDEO_SOCKET" >> "$work/carplay.log" 2>&1
  code=$?

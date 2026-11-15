@@ -14,6 +14,7 @@ record(){
    echo BOOT;tail -c 12000 /var/log/aa-bridge-boot.log 2>/dev/null
    echo PHONE;tail -c 12000 /tmp/aa-autoboot/phone.log 2>/dev/null
    echo RADIO;tail -c 6000 /tmp/aa-autoboot/carplay.log 2>/dev/null
+   echo BLUETOOTH;tail -c 8000 /var/log/bluetooth.log 2>/dev/null
    echo KERNEL;dmesg | tail -n 60
  } > "$dir/current.log.new"
  mv -f "$dir/current.log.new" "$dir/current.log";sync)
