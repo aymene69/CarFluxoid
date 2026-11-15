@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
@@ -259,7 +261,24 @@ static int live_listener=-1,live_peer=-1,control_fd=-1;
 static unsigned char live_buf[LIVE_MAX+12],video_message[LIVE_MAX+10];
 static size_t live_used;
 static int live_disconnected;
+static int live_lock=-1;
+static void reclaim_live_sockets(const char *path){
+ char name[sizeof(((struct sockaddr_un *)0)->sun_path)];
+ const char *suffixes[]={"",".audio",".control"};
+ if(snprintf(name,sizeof name,"%s.lock",path)>=(int)sizeof name){errno=ENAMETOOLONG;die("Live lock path");}
+ live_lock=open(name,O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
+ if(live_lock<0||flock(live_lock,LOCK_EX|LOCK_NB))die("Live sender already running or lock unavailable");
+ for(unsigned i=0;i<3;i++){
+  struct stat st;
+  if(snprintf(name,sizeof name,"%s%s",path,suffixes[i])>=(int)sizeof name){errno=ENAMETOOLONG;die("Live socket path");}
+  if(lstat(name,&st)==0){
+   if(!S_ISSOCK(st.st_mode)){errno=EEXIST;die("Refusing to replace a non-socket live path");}
+   if(unlink(name))die("Reclaim stale live socket");
+  }else if(errno!=ENOENT)die("Inspect live socket");
+ }
+}
 static void open_live_input(const char *path){
+ reclaim_live_sockets(path);
  struct sockaddr_un a={0};a.sun_family=AF_UNIX;
  if(strlen(path)>=sizeof a.sun_path){fprintf(stderr,"Video socket path too long\n");exit(1);}
  strcpy(a.sun_path,path);live_listener=socket(AF_UNIX,SOCK_STREAM,0);if(live_listener<0)die("Video socket");
