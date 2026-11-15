@@ -41,3 +41,7 @@ ssh root@192.168.50.2 'cat /persist/aa-diagnostics/previous.log; cat /persist/aa
 
 Do not use a live-rootfs SSH flash after the observed `Bus error`. The prepared
 candidate installation uses FEL, two reads, rootfs-only writing and full readback.
+
+The pinned kernel has `CONFIG_MODULE_UNLOAD` disabled. Once `aa_bulk` is loaded,
+a RAM module replacement cannot work; `rmmod` returns ENOSYS. Use a cold boot
+with the candidate image (FEL installation) rather than retrying module removal.
