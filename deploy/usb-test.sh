@@ -19,6 +19,7 @@ cleanup(){
  rmdir /tmp/aa-lab-lock 2>/dev/null || true
  echo 'AA_FLOW : débrancher/rebrancher pour revenir à la bêta ; module de test uniquement en RAM.'
  echo AA_LAB_FINISHED
+ exit "$code"
 }
 [ ! -d /sys/module/aa_bulk ] || { echo 'ERREUR : module de test déjà présent. Débrancher/rebrancher avant cet essai.';exit 1; }
 mkdir /tmp/aa-lab-lock
