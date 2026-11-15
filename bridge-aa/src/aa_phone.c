@@ -52,7 +52,7 @@ static int all(int write_mode,void *buf,size_t n){
  while(done<n&&!stop){
   ssize_t r;
   if(!write_mode&&usb_mode){
-   if(usb_pos==usb_len){r=read(fd,usb_buffer,sizeof usb_buffer);if(r<0&&errno==EINTR)continue;if(r==0&&buffered_test)return -1;if(r==0){fprintf(stderr,"USB OUT zero-length packet\n");continue;}if(r<0){fprintf(stderr,"USB OUT read failed: errno=%d (%s) stop=%d\n",errno,strerror(errno),(int)stop);return -1;}usb_len=(size_t)r;usb_pos=0;}
+   if(usb_pos==usb_len){r=read(fd,usb_buffer,sizeof usb_buffer);if(r<0&&errno==EINTR)continue;if(r==0){fprintf(stderr,"USB reader stream closed\n");return -1;}if(r<0){fprintf(stderr,"USB OUT read failed: errno=%d (%s) stop=%d\n",errno,strerror(errno),(int)stop);return -1;}usb_len=(size_t)r;usb_pos=0;}
    size_t take=n-done;if(take>usb_len-usb_pos)take=usb_len-usb_pos;
    memcpy(p+done,usb_buffer+usb_pos,take);usb_pos+=take;r=(ssize_t)take;
   }else r=write_mode?write(out_fd,p+done,n-done):read(fd,p+done,n-done);
