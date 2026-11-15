@@ -4,7 +4,7 @@ import subprocess,os,json,shutil,tempfile
 root=Path('/input');build=Path('/build/aa');host=build/'mbedtls-host'
 if not host.exists():shutil.copytree(build/'mbedtls-rv',host,ignore=shutil.ignore_patterns('*.o','*.a','*.so'))
 subprocess.run(['make','-C',str(host),'-j4','lib'],check=True,stdout=subprocess.DEVNULL)
-for name in ['parser','microphone','video_config']:
+for name in ['parser','microphone','video_config','aoa']:
  binary=build/('test-'+name)
  subprocess.run(['cc','-DSYS_io_pgetevents_time64=SYS_io_pgetevents','-I'+str(host/'include'),str(root/'bridge-aa/tests'/f'{name}.c'),*[str(host/'library'/('lib'+n+'.a')) for n in ['mbedtls','mbedx509','mbedcrypto']],'-lpthread','-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)

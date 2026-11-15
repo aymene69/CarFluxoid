@@ -23,3 +23,6 @@ Autonomous boot, iPhone CarPlay video, touch and music worked with Google DHU on
 - Factory radio variant detection cannot be inferred solely from FEL SoC ID and SPI capacity.
 - Uconnect compatibility and microphone/Siri are not established by the TCP DHU test.
 - No promise is made that arbitrary devices sold under the same marketing name or all head units are compatible.
+
+The vehicle-startup/AOA candidate changes the gadget module and supervisors.
+Its hardware and car validation are pending; see [VEHICLE-TEST.md](VEHICLE-TEST.md).

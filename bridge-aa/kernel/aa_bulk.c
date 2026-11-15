@@ -7,6 +7,9 @@
 #include <linux/completion.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
+#include <linux/workqueue.h>
+#include <linux/delay.h>
+#include "aa_aoa.h"
 #define DEPTH 8
 #define CHUNK 4096
 static struct usb_ep *epin,*epout;
@@ -17,6 +20,15 @@ static DECLARE_WAIT_QUEUE_HEAD(rxwait);
 static DEFINE_MUTEX(readlock);
 static DEFINE_MUTEX(writelock);
 static bool online,overflow,disconnected;
+/* Keep direct accessory mode available for A/B comparison with the validated driver. */
+static bool pre_accessory;
+module_param(pre_accessory,bool,0444);
+static bool accessory=true;
+static unsigned int aoa_requests;
+module_param(aoa_requests,uint,0444);
+static struct usb_composite_dev *aoa_cdev;
+static void aoa_switch(struct work_struct *work);
+static DECLARE_DELAYED_WORK(aoa_work,aoa_switch);
 static unsigned long rx_bytes,tx_bytes;
 module_param(rx_bytes,ulong,0444);module_param(tx_bytes,ulong,0444);
 
@@ -75,6 +87,8 @@ static void disable(struct usb_function *f){
 }
 static int set_alt(struct usb_function *f,unsigned intf_id,unsigned alt){
  int i,ret;
+ if(!READ_ONCE(accessory))return 0;
+ if(READ_ONCE(online))disable(f);
  ret=config_ep_by_speed(f->config->cdev->gadget,f,epin);if(ret)return ret;
  ret=config_ep_by_speed(f->config->cdev->gadget,f,epout);if(ret)return ret;
  ret=usb_ep_enable(epin);if(ret)return ret;
@@ -95,15 +109,56 @@ static int func_bind(struct usb_configuration *c,struct usb_function *f){
  return usb_assign_descriptors(f,fs,hs,NULL,NULL);
 }
 static void func_unbind(struct usb_configuration *c,struct usb_function *f){int i;for(i=0;i<DEPTH;i++)if(rx[i]){kfree(rx[i]->buf);usb_ep_free_request(epout,rx[i]);rx[i]=NULL;}usb_free_all_descriptors(f);}
-static struct usb_function function={.name="aa_bulk",.bind=func_bind,.unbind=func_unbind,.set_alt=set_alt,.disable=disable};
+/* AOA endpoint-zero negotiation works before SET_CONFIGURATION as well. */
+static bool aoa_match(struct usb_function *f,const struct usb_ctrlrequest *ctrl,bool config0){
+ return (ctrl->bRequestType & (USB_TYPE_MASK|USB_RECIP_MASK))==(USB_TYPE_VENDOR|USB_RECIP_DEVICE)
+  && ctrl->bRequest>=51 && ctrl->bRequest<=53;
+}
+static void aoa_complete(struct usb_ep *ep,struct usb_request *req){
+ if(!req->status && req->context==(void *)1)
+  schedule_delayed_work(&aoa_work,msecs_to_jiffies(50));
+}
+static int aoa_setup(struct usb_function *f,const struct usb_ctrlrequest *ctrl){
+ struct usb_composite_dev *cdev=f->config->cdev;
+ struct usb_request *req=cdev->req;
+ u16 length=le16_to_cpu(ctrl->wLength),index=le16_to_cpu(ctrl->wIndex);
+ u8 type=ctrl->bRequestType;
+ int count=aa_aoa_length(type,ctrl->bRequest,le16_to_cpu(ctrl->wValue),index,length);
+ if(count<0)return -EOPNOTSUPP;
+ req->context=NULL;req->complete=aoa_complete;req->zero=0;
+ switch(ctrl->bRequest){
+ case 51:
+  ((u8 *)req->buf)[0]=1;((u8 *)req->buf)[1]=0;req->length=2;break;
+ case 52:
+  /* Android Auto owns the projection; accessory identification is not persisted. */
+  req->length=length;break;
+ case 53:
+  req->length=0;req->context=(void *)1;break;
+ default:return -EOPNOTSUPP;
+ }
+ aoa_requests++;pr_info("aa_bulk: AOA request=%u index=%u length=%u\n",ctrl->bRequest,index,length);
+ return usb_ep_queue(cdev->gadget->ep0,req,GFP_ATOMIC);
+}
+static void aoa_switch(struct work_struct *work){
+ struct usb_composite_dev *cdev=aoa_cdev;
+ if(!cdev)return;
+ usb_gadget_disconnect(cdev->gadget);
+ msleep(250);
+ cdev->desc.idVendor=cpu_to_le16(0x18d1);
+ cdev->desc.idProduct=cpu_to_le16(0x2d00);
+ WRITE_ONCE(accessory,true);
+ usb_gadget_connect(cdev->gadget);
+ pr_info("aa_bulk: AOA accessory mode re-enumeration\n");
+}
+static struct usb_function function={.name="aa_bulk",.bind=func_bind,.unbind=func_unbind,.set_alt=set_alt,.disable=disable,.req_match=aoa_match,.setup=aoa_setup};
 static int config_bind(struct usb_configuration *c){return usb_add_function(c,&function);}
 static struct usb_configuration config={.label="Android Auto",.bConfigurationValue=1,.bmAttributes=USB_CONFIG_ATT_ONE,.MaxPower=250};
 static struct usb_device_descriptor device={.bLength=sizeof device,.bDescriptorType=USB_DT_DEVICE,.bcdUSB=cpu_to_le16(0x200),.idVendor=cpu_to_le16(0x18d1),.idProduct=cpu_to_le16(0x2d00),.bcdDevice=cpu_to_le16(0x100),.bNumConfigurations=1};
 static struct usb_string strings[]={{.s="CarFluxoid"},{.s="CarFluxoid"},{.s="CATPLAY_AA_LAB_KERNEL_QUEUE"},{}};
 static struct usb_gadget_strings lang={.language=0x409,.strings=strings};
 static struct usb_gadget_strings *allstrings[]={&lang,NULL};
-static int bind(struct usb_composite_dev *c){int ret=usb_string_ids_tab(c,strings);if(ret<0)return ret;device.iManufacturer=strings[0].id;device.iProduct=strings[1].id;device.iSerialNumber=strings[2].id;return usb_add_config(c,&config,config_bind);}
+static int bind(struct usb_composite_dev *c){int ret;aoa_cdev=c;accessory=!pre_accessory;if(pre_accessory)c->desc.idProduct=cpu_to_le16(0x4ee1);ret=usb_string_ids_tab(c,strings);if(ret<0)return ret;device.iManufacturer=strings[0].id;device.iProduct=strings[1].id;device.iSerialNumber=strings[2].id;return usb_add_config(c,&config,config_bind);}
 static struct usb_composite_driver driver={.name="aa_bulk",.dev=&device,.strings=allstrings,.max_speed=USB_SPEED_HIGH,.bind=bind};
 static int __init init(void){int ret;INIT_KFIFO(fifo);ret=misc_register(&misc);if(ret)return ret;ret=usb_composite_probe(&driver);if(ret)misc_deregister(&misc);return ret;}
-static void __exit fini(void){usb_composite_unregister(&driver);misc_deregister(&misc);}
+static void __exit fini(void){cancel_delayed_work_sync(&aoa_work);usb_composite_unregister(&driver);misc_deregister(&misc);}
 module_init(init);module_exit(fini);MODULE_LICENSE("GPL");MODULE_DESCRIPTION("Experimental Android Auto gadget with prequeued RX requests");
