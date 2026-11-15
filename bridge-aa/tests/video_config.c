@@ -15,5 +15,11 @@ int main(void){
  f=fopen(path,"w");fputs("max_resolution=480\n",f);fclose(f);
  assert(find_video(only720,sizeof only720)==2&&selected_video_config==0&&display_height==720);
  unsigned char unknown[]={10,10,8,2,26,6,8,3,34,2,8,99};assert(find_video(unknown,sizeof unknown)==-1);
+ unsigned char hevc_first[]={10,10,8,3,26,6,8,7,34,2,8,2,10,10,8,6,26,6,8,3,34,2,8,1};
+ setenv("AA_VIDEO_SOCKET","test",1);
+ assert(find_video(hevc_first,sizeof hevc_first)==6&&selected_codec==3);
+ assert(find_video(hevc_first,12)==-1); /* Never reinterpret HEVC as H264. */
+ unsetenv("AA_VIDEO_SOCKET");
+ assert(find_video(hevc_first,sizeof hevc_first)==3&&selected_codec==7);
  unlink(path);puts("Resolution cap, nonzero configuration index, automatic mode and receiver fallback: PASS");
 }

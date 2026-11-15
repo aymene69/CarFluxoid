@@ -164,6 +164,7 @@ static int find_video(const unsigned char *p,size_t n){
     }index++;
    }
    if(!(codec==3||codec==7||(codec==0&&index)))continue;
+   if(getenv("AA_VIDEO_SOCKET")&&codec==7)continue; /* CarPlay passthrough is H.264. */
    if(choice<0){choice=smallest;chosen_res=smallest_res;}
    if(index&&choice<0)continue;
    if(choice<0){choice=0;chosen_res=480;}
