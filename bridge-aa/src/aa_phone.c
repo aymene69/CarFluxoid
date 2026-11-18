@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,9 @@
 #include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>
 
+#include "mtp.h"
+#include "h264_poc.h"
+
 #define CAP 65536
 static int buffered_test;
 static int diagnostic;
@@ -46,8 +50,28 @@ static void capture_frame(int ch,int flags,const unsigned char *p,size_t n){
  fwrite(h,1,4,frame_capture);fwrite(p,1,n,frame_capture);fflush(frame_capture);
 }
 
-static void die(const char *s){perror(s);exit(1);}
 static uint64_t now_us(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;}
+/* Persist the AA sequence line by line: a head unit may cut VBUS right after a failure. */
+static int trace_fd=-1;static unsigned trace_lines;static uint64_t trace_start;
+static void session_trace(const char *fmt,...){
+ if(trace_fd<0||trace_lines>=800)return;
+ char line[200];va_list ap;int n=snprintf(line,sizeof line,"%llu ",(unsigned long long)((now_us()-trace_start)/1000));
+ va_start(ap,fmt);int m=vsnprintf(line+n,sizeof line-(size_t)n-1,fmt,ap);va_end(ap);
+ if(m>0)n+=m;if(n>(int)sizeof line-2)n=(int)sizeof line-2;line[n++]='\n';
+ if(write(trace_fd,line,(size_t)n)==n)fsync(trace_fd);trace_lines++;
+}
+static void open_session_trace(void){
+ const char *path=getenv("AA_SESSION_TRACE");if(!path||!*path)return;
+ struct stat st;if(!stat(path,&st)&&st.st_size>65536){char old[4096];snprintf(old,sizeof old,"%s.old",path);rename(path,old);}
+ trace_fd=open(path,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0600);trace_start=now_us();
+}
+static const char *hex16(const unsigned char *p,size_t n){
+ static char s[33];size_t k=0;for(size_t i=0;i<n&&i<16;i++)k+=(size_t)snprintf(s+k,sizeof s-k,"%02x",p[i]);s[k]=0;return s;
+}
+static const char *hex64(const unsigned char *p,size_t n){
+ static char s[129];size_t k=0;for(size_t i=0;i<n&&i<64;i++)k+=(size_t)snprintf(s+k,sizeof s-k,"%02x",p[i]);s[k]=0;return s;
+}
+static void die(const char *s){session_trace("FATAL %s errno=%d",s,errno);perror(s);exit(1);}
 static void interrupted(int s){(void)s;stop=1;}
 static int all(int write_mode,void *buf,size_t n){
  unsigned char *p=buf;size_t done=0;
@@ -109,8 +133,11 @@ static int tls_recv(void *ctx,unsigned char *buf,size_t n){
  }
  if(n>left)n=left;memcpy(buf,incoming+at,n);at+=n;left-=n;return (int)n;
 }
-static void check(int r,const char *label){if(r<0){char b[200];mbedtls_strerror(r,b,sizeof b);fprintf(stderr,"%s: %s (-%04x)\n",label,b,-r);exit(1);}}
+static void check(int r,const char *label){if(r<0){char b[200];mbedtls_strerror(r,b,sizeof b);session_trace("FATAL %s -%04x",label,-r);fprintf(stderr,"%s: %s (-%04x)\n",label,b,-r);exit(1);}}
+/* Unit tests capture outgoing messages here; production never sets it. */
+static void (*send_hook)(int ch,int id,const void *data,size_t n);
 static void send_msg(int ch,int flags,int id,const void *data,size_t n){
+ if(send_hook){send_hook(ch,id,data,n);return;}
  if(n+2>16000){fprintf(stderr,"Message exceeds prototype TLS record limit\n");exit(1);}
  plain[0]=(unsigned char)(id>>8);plain[1]=(unsigned char)id;memcpy(plain+2,data,n);tx_ch=ch;tx_flags=flags;
  int r=mbedtls_ssl_write(&ssl,plain,n+2);check(r,"TLS write");if((size_t)r!=n+2){fprintf(stderr,"Short TLS write\n");exit(1);}
@@ -144,12 +171,21 @@ static void load_waiting_video(void){
  fprintf(stderr,"WAIT_SCREEN ready %ux%u bytes=%zu\n",display_width,display_height,waiting_size);
 }
 static int selected_video_config;
+static unsigned video_margin_w,video_margin_h;
 static unsigned requested_resolution(void){
  const char *path=getenv("AA_SETTINGS_FILE");if(!path)path="/persist/aa-settings/options.txt";
  FILE *f=fopen(path,"r");if(!f)return 0;char line[256];unsigned cap=0;
  while(fgets(line,sizeof line,f)){unsigned v;if(sscanf(line,"max_resolution=%u",&v)==1&&(v==0||v==480||v==720||v==1080))cap=v;}
  fclose(f);return cap;
 }
+/* h264_poc2=0 in the settings file keeps the iPhone POC type 0 stream unchanged. */
+static int h264_poc2_enabled(void){
+ const char *path=getenv("AA_SETTINGS_FILE");if(!path)path="/persist/aa-settings/options.txt";
+ FILE *f=fopen(path,"r");if(!f)return 1;char line[256];unsigned enabled=1;
+ while(fgets(line,sizeof line,f)){unsigned v;if(sscanf(line,"h264_poc2=%u",&v)==1&&v<=1)enabled=v;}
+ fclose(f);return (int)enabled;
+}
+static int h264_poc2=1;
 static int find_video(const unsigned char *p,size_t n){
  unsigned cap=requested_resolution();size_t i=0,l;unsigned t;uint64_t v;const unsigned char *b;
  selected_video_config=0;
@@ -171,14 +207,83 @@ static int find_video(const unsigned char *p,size_t n){
    if(index&&choice<0)continue;
    if(choice<0){choice=0;chosen_res=480;}
    if(id<=0||id>=256)continue;
-   selected_video_config=choice;selected_codec=codec?codec:3;
+   selected_video_config=choice;selected_codec=codec?codec:3;video_margin_w=video_margin_h=0;
+   /* Margins of the chosen configuration: the head unit hides them (Uconnect status bar). */
+   for(size_t mi=0,cfg=0;mi<sl;){if(field(sb,sl,&mi,&ct,&cv,&cb,&cl))break;if(ct!=4||!cb)continue;if((int)cfg++==choice){video_margin_w=(unsigned)value(cb,cl,3,0);video_margin_h=(unsigned)value(cb,cl,4,0);break;}}
    display_height=chosen_res;display_width=chosen_res==480?800:chosen_res==720?1280:1920;
    fprintf(stderr,"AA_VIDEO_SELECTED channel=%d codec=%d config=%d size=%ux%u requested_cap=%u\n",id,selected_codec,choice,display_width,display_height,cap);return id;
   }
  }return -1;
 }
 static int input_channel=-1,audio_channel=-1,audio_fd=-1,audio_ready,audio_unacked,audio_max_unacked=1;
+/* CarPlay media -> AA media sink, in the order of Google's head unit integration guide: audio focus
+ * GAIN first, then START with a new session, then PCM, and STOP once the iPhone goes quiet.
+ * The Uconnect routes AA media from its playbackStart callback (CVTOPROJECTIONDEVICE.DLL,
+ * AASinkCb:playbackStartCallback). START used to leave at channel setup, before any focus, and PCM
+ * before the grant: the sink acknowledged every block (car log 2026-11-18) but routed none to the
+ * speakers. CONFIG is parsed before any reply: replies reuse the receive buffer. */
+#define AUDIO_WINDOW_MAX 4096
+#define AUDIO_FOCUS_RETRY_US 2000000ULL
+#define AUDIO_STOP_IDLE_US 2000000ULL
+#define AUDIO_RELEASE_IDLE_US 15000000ULL
+static int audio_window(uint64_t announced){return announced<1?1:announced>AUDIO_WINDOW_MAX?AUDIO_WINDOW_MAX:(int)announced;}
+static unsigned audio_sent,audio_acks,audio_underflows,audio_stalls,audio_peak,audio_discarded,audio_session,ping_seen;
+static int audio_streaming;
+static uint64_t audio_full_at,audio_stats_at;
+/* audio_focus: 0 none, 1 requested, 2 granted (GAIN, GAIN_TRANSIENT, LOSS_TRANSIENT_CAN_DUCK, GAIN_MEDIA_ONLY). */
+static int audio_focus;static uint64_t audio_focus_at,audio_last;
 static uint64_t audio_samples,audio_epoch;
+static void request_audio_focus(unsigned type,uint64_t now){unsigned char req[]={8,(unsigned char)type};send_msg(0,11,0x12,req,sizeof req);audio_focus_at=now;session_trace("TX audio_focus_request type=%u",type);}
+static void audio_on_config(const unsigned char *body,size_t len){
+ if(value(body,len,1,0)!=2){session_trace("AUDIO_CONFIG rejected %s",hex16(body,len));return;}
+ audio_max_unacked=audio_window(value(body,len,2,1));audio_unacked=0;audio_ready=1;
+ fprintf(stderr,"AUDIO_READY 48000 stereo PCM16 window=%d\n",audio_max_unacked);session_trace("AUDIO_READY window=%d",audio_max_unacked);
+}
+static void audio_start(uint64_t now,uint64_t start){
+ unsigned char begin[8]={8};size_t n=1;unsigned id=++audio_session;
+ do{begin[n++]=(unsigned char)((id&127)|(id>=128?128:0));id>>=7;}while(id);begin[n++]=16;begin[n++]=0;
+ send_msg(audio_channel,11,0x8001,begin,n);audio_streaming=1;audio_unacked=0;audio_epoch=now-start;audio_samples=0;
+ session_trace("AUDIO_START session=%u discarded=%u",audio_session,audio_discarded);
+}
+static void audio_stop(const char *why){
+ if(!audio_streaming)return;
+ send_msg(audio_channel,11,0x8002,"",0);audio_streaming=0;audio_unacked=0;
+ session_trace("AUDIO_STOP session=%u %s sent=%u acks=%u",audio_session,why,audio_sent,audio_acks);
+}
+static void audio_on_focus(unsigned state){
+ audio_focus=state==1||state==2||state==4||state==6?2:0;
+ if(!audio_focus)audio_stop("focus_lost");
+}
+static void audio_on_ack(const unsigned char *body,size_t len){
+ int ack=(int)value(body,len,2,1);
+ if(!audio_acks)session_trace("RX audio ack first %s unacked=%d",hex16(body,len),audio_unacked);
+ audio_acks+=(unsigned)(ack>0?ack:0);audio_unacked=ack>audio_unacked?0:audio_unacked-ack;
+}
+static void audio_pump(uint64_t now,uint64_t start){
+ if(!audio_ready||audio_fd<0)return;
+ /* A head unit that stops acknowledging must not mute the stream for good. */
+ if(audio_streaming&&audio_unacked>=audio_max_unacked&&now-audio_full_at>2000000){audio_stalls++;session_trace("AUDIO_ACK_STALL unacked=%d window=%d acks=%u",audio_unacked,audio_max_unacked,audio_acks);audio_unacked=0;}
+ while(!(audio_streaming&&audio_unacked>=audio_max_unacked)){
+  unsigned char pcm[8192],data[8200];ssize_t count=recv(audio_fd,pcm,sizeof pcm,MSG_DONTWAIT);
+  if(count<=0)break;
+  if(!audio_last){session_trace("AUDIO_PCM_START bytes=%zd focus=%d window=%d",count,audio_focus,audio_max_unacked);audio_stats_at=now;}
+  audio_last=now;
+  for(ssize_t k=0;k+1<count;k+=2){int sample=(int16_t)(pcm[k]|pcm[k+1]<<8);unsigned level=(unsigned)(sample<0?-sample:sample);if(level>audio_peak)audio_peak=level;}
+  if(!audio_streaming){
+   if(audio_focus==2)audio_start(now,start);
+   else{if(!audio_focus_at||now-audio_focus_at>AUDIO_FOCUS_RETRY_US){request_audio_focus(1,now);audio_focus=1;}audio_discarded++;continue;}
+  }
+  uint64_t ts=audio_epoch+audio_samples*1000000ULL/48000;audio_samples+=(uint64_t)count/4;
+  for(int k=7;k>=0;k--){data[k]=(unsigned char)ts;ts>>=8;}memcpy(data+8,pcm,(size_t)count);
+  send_msg(audio_channel,11,0,data,(size_t)count+8);audio_sent++;
+  if(++audio_unacked>=audio_max_unacked)audio_full_at=now;
+  TRACE("AUDIO sent bytes=%zd\n",count);
+ }
+ /* Delivery counters and PCM peak level: the car log shows whether audio reached the sink. */
+ if(audio_last&&now-audio_stats_at>=5000000){audio_stats_at=now;session_trace("AUDIO_STATS sent=%u acks=%u unacked=%d window=%d session=%u streaming=%d discarded=%u underflows=%u peak=%u focus=%d",audio_sent,audio_acks,audio_unacked,audio_max_unacked,audio_session,audio_streaming,audio_discarded,audio_underflows,audio_peak,audio_focus);audio_peak=0;}
+ if(audio_streaming&&now-audio_last>AUDIO_STOP_IDLE_US)audio_stop("idle");
+ if(audio_last&&now-audio_last>AUDIO_RELEASE_IDLE_US){if(audio_focus)request_audio_focus(4,now);audio_focus=0;audio_last=0;session_trace("AUDIO_PCM_IDLE sent=%u acks=%u underflows=%u",audio_sent,audio_acks,audio_underflows);}
+}
 
 /* Head-unit PCM source -> local CarPlay recorder. Only mono PCM16 is accepted. */
 static int mic_channel=-1,mic_ready,mic_wanted,mic_open,mic_session=1;
@@ -314,16 +419,86 @@ static int next_live_frame(size_t *length,uint64_t *stamp){
   live_used+=(size_t)n;
  }
 }
-static void send_video(int ch,const unsigned char *data,size_t length,uint64_t stamp){
+/* Uconnect VP2 drops every H.264 sample until MEDIA_CODEC_CONFIG (id 1) supplies SPS/PPS,
+ * as Android phones send it; parameter sets therefore leave the timestamped data message,
+ * like SEI and AUD units, which phones do not send either. */
+static unsigned char codec_config[1024],config_scratch[1024];
+static size_t codec_config_size;
+static int codec_config_pending=1,frames_since_config;
+static size_t annexb_next(const unsigned char *p,size_t n,size_t i){
+ for(;i+3<=n;i++)if(!p[i]&&!p[i+1]&&(p[i+2]==1||(i+4<=n&&!p[i+2]&&p[i+3]==1)))return i;return n;
+}
+static size_t split_parameter_sets(const unsigned char *in,size_t n,unsigned char *out,size_t cap,size_t *config_size){
+ size_t at=annexb_next(in,n,0),used=at;memcpy(out,in,at);*config_size=0;
+ while(at<n){size_t code=in[at+2]==1?3:4,end=annexb_next(in,n,at+code);unsigned type=at+code<n?in[at+code]&31:0;
+  if((type==7||type==8)&&*config_size+end-at<=sizeof config_scratch){
+   size_t k=type==7&&h264_poc2?poc_rewrite_sps(in+at+code,end-at-code,config_scratch+*config_size+code,sizeof config_scratch-*config_size-code,0):0;
+   if(type==8)poc_parse_pps(in+at+code,end-at-code);
+   if(k){memcpy(config_scratch+*config_size,in+at,code);*config_size+=code+k;}
+   else{memcpy(config_scratch+*config_size,in+at,end-at);*config_size+=end-at;}
+  }
+  else if(type!=6&&type!=9){
+   size_t k=(type==1||type==5)&&used+code<cap?poc_rewrite_slice(in+at+code,end-at-code,out+used+code,cap-used-code):0;
+   if(k){memcpy(out+used,in+at,code);used+=code+k;}
+   else{memcpy(out+used,in+at,end-at);used+=end-at;}
+  }
+  at=end;
+ }
+ return used;
+}
+/* Consecutive IDR pictures must carry different idr_pic_id: alternate the first two coded pictures. */
+static size_t waiting_unit_off[2],waiting_unit_len[2];
+static int waiting_units,waiting_next;
+static void index_waiting_units(void){
+ size_t at=annexb_next(waiting_video,waiting_size,0),begin=0;waiting_units=0;
+ while(at<waiting_size&&waiting_units<2){size_t code=waiting_video[at+2]==1?3:4,end=annexb_next(waiting_video,waiting_size,at+code);
+  unsigned type=at+code<waiting_size?waiting_video[at+code]&31:0;
+  if(type>=1&&type<=5){waiting_unit_off[waiting_units]=begin;waiting_unit_len[waiting_units++]=end-begin;begin=end;}
+  at=end;
+ }
+}
+static int send_video(int ch,const unsigned char *data,size_t length,uint64_t stamp){
+ if(selected_codec==3){size_t config_size;length=split_parameter_sets(data,length,video_message+10,LIVE_MAX,&config_size);
+  if(config_size&&(config_size!=codec_config_size||memcmp(config_scratch,codec_config,config_size))){
+   memcpy(codec_config,config_scratch,config_size);codec_config_size=config_size;codec_config_pending=1;
+  }
+  if(codec_config_pending&&codec_config_size){
+   send_msg(ch,11,1,codec_config,codec_config_size);codec_config_pending=0;frames_since_config=0;
+   fprintf(stderr,"AA_VIDEO_CODEC_CONFIG bytes=%zu\n",codec_config_size);
+   session_trace("TX codec_config bytes=%zu poc2=%d/%d %s",codec_config_size,h264_poc2,poc_state.active,hex64(codec_config,codec_config_size));
+  }
+  if(!length)return 0;
+  if(frames_since_config++<3){
+   char types[32];size_t k=0,at=annexb_next(video_message+10,length,0);types[0]=0;
+   while(at<length&&k+4<sizeof types){size_t code=video_message[10+at+2]==1?3:4;if(at+code<length)k+=(size_t)snprintf(types+k,sizeof types-k,"%u,",video_message[10+at+code]&31u);at=annexb_next(video_message+10,length,at+code);}
+   session_trace("TX video after_config=%d bytes=%zu nal=%s",frames_since_config,length,types);
+  }
+ }else memcpy(video_message+10,data,length);
  video_message[0]=0;video_message[1]=0;
  for(int k=9;k>=2;k--){video_message[k]=(unsigned char)stamp;stamp>>=8;}
- memcpy(video_message+10,data,length);size_t total=length+10;
+ size_t total=length+10;
  fragmented_total=(uint32_t)total;
  for(size_t offset=0;offset<total;){size_t chunk=total-offset;if(chunk>15000)chunk=15000;
   tx_ch=ch;tx_flags=8|(offset==0?1:0)|(offset+chunk==total?2:0);
   int r=mbedtls_ssl_write(&ssl,video_message+offset,chunk);check(r,"Video TLS write");
   if(r!=(int)chunk){fprintf(stderr,"Short video write\n");exit(1);}offset+=chunk;
  }
+ return 1;
+}
+/* CarPlay pictures decode only from an IDR on: after dropped frames the bridge waits for one and
+ * asks the iPhone for it through the relay (datagram 0x10 on the touch socket). */
+static int need_idr;static uint64_t keyframe_asked;
+static int has_idr(const unsigned char *p,size_t n){
+ size_t at=annexb_next(p,n,0);while(at<n){size_t code=p[at+2]==1?3:4;if(at+code<n&&(p[at+code]&31)==5)return 1;at=annexb_next(p,n,at+code);}return 0;
+}
+static void request_keyframe(void){
+ if(keyframe_asked&&now_us()-keyframe_asked<1000000)return;keyframe_asked=now_us();
+ const char *video_path=getenv("AA_VIDEO_SOCKET");if(!video_path)return;
+ struct sockaddr_un target={0};target.sun_family=AF_UNIX;
+ if(snprintf(target.sun_path,sizeof target.sun_path,"%s.touch",video_path)>=(int)sizeof target.sun_path)return;
+ int ask_fd=socket(AF_UNIX,SOCK_DGRAM,0);if(ask_fd<0)return;unsigned char ask=0x10;
+ if(sendto(ask_fd,&ask,1,0,(struct sockaddr*)&target,sizeof target)==1)session_trace("TX keyframe_request");
+ close(ask_fd);
 }
 static void configure_tls(const char *certfile,const char *keyfile){
  static mbedtls_ssl_config cfg;static mbedtls_entropy_context entropy;static mbedtls_ctr_drbg_context rng;static mbedtls_x509_crt cert;static mbedtls_pk_context key;
@@ -484,14 +659,52 @@ static void open_ffs(const char *mountpoint){
  start_usb_reader();
  fprintf(stderr,"FUNCTIONFS_READY\n");
 }
+static int run_mtp(const char *device){
+ fd=open(device,O_RDWR);if(fd<0)die("MTP device");out_fd=fd;usb_mode=1;
+ signal(SIGPIPE,SIG_IGN);
+ struct sigaction action;memset(&action,0,sizeof action);action.sa_handler=interrupted;sigemptyset(&action.sa_mask);
+ sigaction(SIGTERM,&action,NULL);sigaction(SIGINT,&action,NULL);
+ uint32_t session=0;fprintf(stderr,"MTP_READY: discovery only, no storage exposed\n");
+ while(!stop){
+  unsigned char command[32];struct mtp_reply reply;
+  if(all(0,command,12))break;
+  size_t count=mtp_u32(command);
+  if(count<12 || count>sizeof command || count%4){fprintf(stderr,"MTP_INVALID_CONTAINER length=%zu\n",count);break;}
+  if(count>12 && all(0,command+12,count-12))break;
+  if(mtp_command(command,count,&session,&reply)){fprintf(stderr,"MTP_INVALID_COMMAND\n");break;}
+  fprintf(stderr,"MTP_RX op=%04x transaction=%u response=%04x data=%zu\n",mtp_u16(command+6),mtp_u32(command+8),mtp_u16(reply.response+6),reply.data_size);
+  if(reply.data_size && all(1,reply.data,reply.data_size))break;
+  if(all(1,reply.response,reply.response_size))break;
+ }
+ close(fd);fprintf(stderr,"MTP_CLOSED: disconnect or switch to accessory\n");return 0;
+}
+static int gadget_flag(const char *name){
+ char path[512],value=0;const char *dir=getenv("AA_TEST_USB_STATE_DIR");
+ if(!dir)dir="/sys/module/aa_bulk/parameters";
+ if(snprintf(path,sizeof path,"%s/%s",dir,name)>=(int)sizeof path)return -1;
+ int f=open(path,O_RDONLY);if(f<0)return -1;ssize_t n=read(f,&value,1);close(f);
+ return n==1?(value=='Y'||value=='1'):-1;
+}
+static int wait_mtp_accessory(const char *device){
+ fprintf(stderr,"MTP_DISCOVERY: waiting for head-unit ACCESSORY_START\n");
+ while(!stop){
+  int accessory=gadget_flag("accessory_active"),online=gadget_flag("usb_online");
+  if(accessory<0 || online<0){fprintf(stderr,"MTP_STATE_UNAVAILABLE\n");return -1;}
+  if(accessory && online){usb_pos=usb_len=0;fprintf(stderr,"MTP_SWITCHED_TO_ACCESSORY: USB endpoints ready\n");return 0;}
+  if(!accessory && online){run_mtp(device);usb_pos=usb_len=0;}
+  else usleep(100000);
+ }
+ return -1;
+}
 int main(int argc,char **argv){
+ if(argc==3 && !strcmp(argv[1],"--mtp"))return run_mtp(argv[2]);
  if(argc==2&&!strcmp(argv[1],"--probe-aio")){
   aio_context_t ctx=0;
   if(syscall(SYS_io_setup,8,&ctx)<0){fprintf(stderr,"AIO_UNAVAILABLE errno=%d (%s): kernel support required\n",errno,strerror(errno));return 3;}
   syscall(SYS_io_destroy,ctx);fprintf(stderr,"AIO_AVAILABLE\n");return 0;
  }
  if(argc!=6){fprintf(stderr,"Usage: %s HOST PORT CERT KEY MIRE.h264\n       %s --ffs MOUNT CERT KEY MIRE.h264\n",argv[0],argv[0]);return 2;}
- diagnostic=getenv("AA_DIAGNOSTIC")&&!strcmp(getenv("AA_DIAGNOSTIC"),"1");
+ diagnostic=getenv("AA_DIAGNOSTIC")&&!strcmp(getenv("AA_DIAGNOSTIC"),"1");h264_poc2=h264_poc2_enabled();
  if(diagnostic){
   raw_capture=fopen("usb-rx.bin","wb");frame_capture=fopen("aa-rx.bin","wb");
   if(!raw_capture||!frame_capture)die("Diagnostic capture");
@@ -505,6 +718,7 @@ int main(int argc,char **argv){
  unsigned char video[15000];FILE *f=fopen(argv[5],"rb");if(!f)die("Video file");size_t vn=fread(video,1,sizeof video,f);if(!vn||!feof(f)){fprintf(stderr,"Test frame must be 1..14999 bytes\n");return 2;}fclose(f);
  int raw_mode=!strcmp(argv[1],"--raw");
  usb_mode=!strcmp(argv[1],"--ffs")||raw_mode;
+ if(raw_mode && getenv("AA_MTP_DISCOVERY") && wait_mtp_accessory(argv[2]))return 1;
  if(raw_mode){fd=open(argv[2],O_RDWR);if(fd<0)die("Kernel queue device");out_fd=fd;start_usb_reader();}
  else if(usb_mode)open_ffs(argv[2]);
  else {
@@ -520,38 +734,58 @@ int main(int argc,char **argv){
  struct timeval timeout={10,0};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout);setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof timeout);
  if(getenv("AA_TEST_READER")){usb_mode=1;start_usb_reader();}
  }
- int ch,flags;size_t n;if(receive(&ch,&flags,wire,&n)||ch||n<6||wire[0]||wire[1]!=1){fprintf(stderr,"Expected AA VERSION_REQUEST\n");return 1;}
+ open_session_trace();session_trace("SESSION_START pid=%d transport=%s",(int)getpid(),argv[1]);
+ int ch,flags;size_t n;if(receive(&ch,&flags,wire,&n)||ch||n<6||wire[0]||wire[1]!=1){session_trace("NO_VERSION_REQUEST");fprintf(stderr,"Expected AA VERSION_REQUEST\n");return 1;}
+ session_trace("RX version %s",hex16(wire,n));
  unsigned char version[]={0,2,0,1,0,7,0,0};if(frame(0,3,version,sizeof version))die("VERSION_RESPONSE");fprintf(stderr,"AA VERSION 1.7 negotiated\n");
  configure_tls(argv[3],argv[4]);check(mbedtls_ssl_handshake(&ssl),"TLS handshake");if(flush_handshake())die("TLS flight write");handshake=0;fprintf(stderr,"AA TLS 1.2 established cipher=%s\n",mbedtls_ssl_get_ciphersuite(&ssl));
- int video_ch=-1,running=0,focused=0,unacked=0,max_unacked=1,frames=0,have_carplay_video=0;uint64_t start=now_us(),next=0;
+ session_trace("TLS_OK");
+ int video_ch=-1,running=0,focused=0,unacked=0,max_unacked=1,frames=0,carplay_seen=0,lost_focus=0;unsigned video_acks=0;uint64_t start=now_us(),next=0;
+ /* The Uconnect returns to its native screen when no picture arrives ~5 s after granting focus, and
+  * keeps the first codec configuration of a session: the waiting screen is encoded under the
+  * iPhone's own SPS/PPS (tooling/waiting_iphone_config.py) and starts at once. */
+ uint64_t waiting_delay=getenv("AA_WAITING_DELAY_MS")?strtoull(getenv("AA_WAITING_DELAY_MS"),NULL,10)*1000:0;
  while(!stop&&(getenv("AA_AUTONOMOUS")||now_us()-start<(live_listener>=0?600000000ULL:120000000ULL))){
   poll_live_disconnect();
    if(live_disconnected){
-    live_disconnected=0;have_carplay_video=0;unacked=0;next=0;
+    live_disconnected=0;unacked=0;next=0;carplay_seen=0;need_idr=1;
     unsigned char stale[8192];while(audio_fd>=0&&recv(audio_fd,stale,sizeof stale,MSG_DONTWAIT)>0){}
+    audio_stop("carplay_disconnected");
     mic_wanted=0;microphone_request();
-    fprintf(stderr,"CARPLAY_DISCONNECTED: returning to waiting screen\n");
+    fprintf(stderr,"CARPLAY_DISCONNECTED: returning to waiting screen\n");session_trace("CARPLAY_DISCONNECTED");
    }
   if(control_fd>=0&&video_ch>0){unsigned char event;
    if(recv(control_fd,&event,1,MSG_DONTWAIT)==1){if(event==2||event==3){mic_wanted=event==2;microphone_request();}else if(event==4){if(live_peer>=0)close(live_peer);live_peer=-1;live_used=0;live_disconnected=1;}else if(event==1){unsigned char native[]={0x10,2,0x18,4};send_msg(video_ch,11,0x8007,native,sizeof native);focused=0;fprintf(stderr,"CAR_RETURN: Android Auto native UI requested\n");}}
   }
-  while(audio_ready&&audio_unacked<audio_max_unacked){unsigned char pcm[8192],data[8200];ssize_t count=recv(audio_fd,pcm,sizeof pcm,MSG_DONTWAIT);
-   if(count<=0)break;
-   if(count>0){if(!audio_epoch)audio_epoch=now_us()-start;uint64_t ts=audio_epoch+audio_samples*1000000ULL/48000;audio_samples+=(uint64_t)count/4;for(int k=7;k>=0;k--){data[k]=ts;ts>>=8;}memcpy(data+8,pcm,(size_t)count);send_msg(audio_channel,11,0,data,(size_t)count+8);audio_unacked++;TRACE("AUDIO sent bytes=%zd\n",count);}
+  audio_pump(now_us(),start);
+  /* Without video focus the relay must still be drained, or its 2 s write timeout ends CarPlay video. */
+  if(live_listener>=0&&!(running&&focused)){size_t dl;uint64_t ds;unsigned dropped=0;
+   while(next_live_frame(&dl,&ds)){live_used=0;dropped++;}
+   if(dropped){if(!carplay_seen)session_trace("CARPLAY_FIRST_FRAME unfocused");carplay_seen=1;if(!need_idr)session_trace("VIDEO_DROP unfocused frames=%u",dropped);need_idr=1;}
   }
   if(running&&focused&&unacked<max_unacked&&now_us()>=next){
    size_t length=vn;uint64_t stamp=now_us()-start;
    int live_ready=live_listener>=0?next_live_frame(&length,&stamp):0;
-   if(live_ready)have_carplay_video=1;
+   if(live_ready){if(!carplay_seen)session_trace("CARPLAY_FIRST_FRAME after_waiting=%d",frames>0);carplay_seen=1;}
+   if(live_ready&&need_idr){
+    if(has_idr(live_buf+12,length)){need_idr=0;session_trace("VIDEO_RESUME_IDR bytes=%zu",length);}
+    else{live_used=0;live_ready=0;request_keyframe();}
+   }
    if(live_listener<0||live_ready){
-    send_video(video_ch,live_listener<0?video:live_buf+12,length,stamp);
+    /* One monotonic session clock for every source: CarPlay PTS restart near zero, which the
+     * Uconnect renderer treats as late samples after the waiting screen and never displays. */
+    int sent=send_video(video_ch,live_listener<0?video:live_buf+12,length,now_us()-start);
     if(live_listener>=0)live_used=0;
-    unacked++;frames++;next=now_us()+(live_listener<0?500000:0);
+    unacked+=sent;frames+=sent;next=now_us()+(live_listener<0?500000:0);
     TRACE("VIDEO frame=%d bytes=%zu unacked=%d source=%s\n",frames,length,unacked,live_listener<0?"test":"CarPlay");
-   }else if(!have_carplay_video&&waiting_video&&waiting_size){
-    send_video(video_ch,waiting_video,waiting_size,now_us()-start);
-    unacked++;frames++;next=now_us()+1000000;
-    TRACE("VIDEO frame=%d bytes=%zu source=Bluetooth-waiting-screen\n",frames,waiting_size);
+    if(sent&&(frames<=5||!(frames%50)))session_trace("TX video n=%d bytes=%zu unacked=%d src=%s",frames,length,unacked,live_listener<0?"test":"CarPlay");
+   }else if(!carplay_seen&&!live_ready&&now_us()-start>=waiting_delay&&waiting_units&&(waiting_units>1||codec_config_pending)){
+    /* A single coded picture is resent only with a new codec configuration. */
+    int unit=waiting_next;waiting_next=(waiting_next+1)%waiting_units;
+    int sent=send_video(video_ch,waiting_video+waiting_unit_off[unit],waiting_unit_len[unit],now_us()-start);
+    unacked+=sent;frames+=sent;next=now_us()+1000000;
+    TRACE("VIDEO frame=%d bytes=%zu source=Bluetooth-waiting-screen\n",frames,waiting_unit_len[unit]);
+    if(sent&&(frames<=5||!(frames%50)))session_trace("TX video n=%d bytes=%zu unacked=%d src=waiting unit=%d",frames,waiting_unit_len[unit],unacked,unit);
    }
   }
   fd_set set;FD_ZERO(&set);FD_SET(fd,&set);struct timeval wait={0,100000};
@@ -564,8 +798,9 @@ int main(int argc,char **argv){
     if(!FD_ISSET(fd,&set))continue;
    }
    int incoming_flags;size_t incoming_len;
-   if(receive(&rx_ch,&incoming_flags,incoming,&incoming_len))break;
+   if(receive(&rx_ch,&incoming_flags,incoming,&incoming_len)){session_trace("TRANSPORT_CLOSED");break;}
    if(!(incoming_flags&8)){
+    session_trace("RX plain ch=%d flags=%02x len=%zu %s",rx_ch,incoming_flags,incoming_len,hex16(incoming,incoming_len));
     if(rx_ch==0&&incoming_len>=2&&incoming[0]==0&&incoming[1]==4){
      if(value(incoming+2,incoming_len-2,1,999)!=0){fprintf(stderr,"AA authentication rejected\n");return 1;}
      unsigned char name[]={0x22,10,'C','a','r','F','l','u','x','o','i','d'};
@@ -578,11 +813,15 @@ int main(int argc,char **argv){
   if(diagnostic){fprintf(stderr,"TLS_EXPECTED_RX_COUNTER=");for(int k=0;k<8;k++)fprintf(stderr,"%02x",ssl.in_ctr[k]);fprintf(stderr,"\n");}
   int r=mbedtls_ssl_read(&ssl,plain,sizeof plain);if(r==0)break;if(r==MBEDTLS_ERR_SSL_WANT_READ||r==MBEDTLS_ERR_SSL_WANT_WRITE)continue;check(r,"TLS read");if(r<2)continue;
   int id=(plain[0]<<8)|plain[1];const unsigned char *body=plain+2;size_t len=(size_t)r-2;TRACE("RX ch=%d msg=%04x bytes=%zu\n",rx_ch,id,len);
+  if(rx_ch==video_ch&&id==0x8004){if(++video_acks<=5||!(video_acks%50))session_trace("RX video ack n=%u",video_acks);}
+  else if(!(rx_ch==mic_channel&&id<2)&&!(rx_ch==audio_channel&&(id==0x8004||id==0x800b))&&!(rx_ch==input_channel&&id==0x8001)&&!(rx_ch==0&&id==0x0b&&ping_seen++%10))session_trace("RX ch=%d id=%04x len=%zu %s",rx_ch,id,len,hex16(body,len));
   if(rx_ch==0&&id==4){unsigned char name[]={0x22,10,'C','a','r','F','l','u','x','o','i','d'};send_msg(0,11,5,name,sizeof name);}
   else if(rx_ch==0&&id==6){input_channel=find_input(body,len);video_ch=find_video(body,len);audio_channel=live_listener>=0?find_media_audio(body,len):-1;mic_channel=live_listener>=0?find_microphone(body,len):-1;if(live_listener>=0&&selected_codec!=3){fprintf(stderr,"Live CarPlay requires an H264 receiver\n");return 1;}if(video_ch<0){fprintf(stderr,"No H264 video service\n");return 1;}fprintf(stderr,"Selected video service=%d codec=%d AA_DISPLAY=%ux%u\n",video_ch,selected_codec,display_width,display_height);
- load_waiting_video();
- if(getenv("AA_VIDEO_SOCKET")){char path[4096];snprintf(path,sizeof path,"%s.display",getenv("AA_VIDEO_SOCKET"));FILE *display=fopen(path,"w");if(!display)die("Display negotiation file");fprintf(display,"%u %u\n",display_width,display_height);fclose(display);}if(selected_codec==7){char path[4096];snprintf(path,sizeof path,"%s.hevc",argv[5]);FILE *hf=fopen(path,"rb");if(!hf)die("HEVC test frame");vn=fread(video,1,sizeof video,hf);if(!vn||!feof(hf)){fclose(hf);return 1;}fclose(hf);}open_video(video_ch);if(input_channel>0)open_video(input_channel);if(audio_channel>0)open_video(audio_channel);if(mic_channel>0)open_video(mic_channel);}
+ load_waiting_video();index_waiting_units();session_trace("SERVICES video=%d input=%d audio=%d mic=%d waiting_units=%d margins=%ux%u",video_ch,input_channel,audio_channel,mic_channel,waiting_units,video_margin_w,video_margin_h);
+ for(size_t o=0;o<len;o+=48)session_trace("SDR %zu %s",o,hex64(body+o,len-o<48?len-o:48));
+ if(getenv("AA_VIDEO_SOCKET")){char path[4096];snprintf(path,sizeof path,"%s.display",getenv("AA_VIDEO_SOCKET"));FILE *display=fopen(path,"w");if(!display)die("Display negotiation file");fprintf(display,"%u %u %u %u\n",display_width,display_height,video_margin_w,video_margin_h);fclose(display);}if(selected_codec==7){char path[4096];snprintf(path,sizeof path,"%s.hevc",argv[5]);FILE *hf=fopen(path,"rb");if(!hf)die("HEVC test frame");vn=fread(video,1,sizeof video,hf);if(!vn||!feof(hf)){fclose(hf);return 1;}fclose(hf);}open_video(video_ch);if(input_channel>0)open_video(input_channel);if(audio_channel>0)open_video(audio_channel);if(mic_channel>0)open_video(mic_channel);}
   else if(rx_ch==0&&id==11)send_msg(0,11,12,body,len);
+  else if(rx_ch==0&&id==0x13)audio_on_focus((unsigned)value(body,len,1,0));
   else if(rx_ch==0&&id==15){send_msg(0,11,16,"",0);break;}
   else if(rx_ch==mic_channel&&id==8){if(value(body,len,1,999)==0){mic_ready=1;fprintf(stderr,"AA_MIC_CHANNEL_READY\n");microphone_request();}else fprintf(stderr,"AA_MIC channel rejected\n");}
   else if(rx_ch==mic_channel&&id==0x8003){if(value(body,len,1,999)==2){mic_ready=1;microphone_request();}else fprintf(stderr,"AA_MIC setup rejected\n");}
@@ -591,15 +830,27 @@ int main(int argc,char **argv){
   else if(rx_ch==mic_channel&&(id==0||id==1)){microphone_pcm(body,len,id==0);unsigned char ack[8]={8};size_t an=1;unsigned session=(unsigned)mic_session;do{ack[an++]=(session&127)|(session>=128?128:0);session>>=7;}while(session);ack[an++]=16;ack[an++]=1;send_msg(mic_channel,11,0x8004,ack,an);}
   else if(rx_ch==mic_channel&&id==0x8002){mic_open=0;fprintf(stderr,"AA_MIC_STOPPED\n");}
   else if(rx_ch==audio_channel&&id==8){unsigned char setup[]={8,1};send_msg(audio_channel,11,0x8000,setup,sizeof setup);}
-  else if(rx_ch==audio_channel&&id==0x8003){if(value(body,len,1,0)==2){unsigned char begin[]={8,2,16,0};send_msg(audio_channel,11,0x8001,begin,sizeof begin);audio_max_unacked=(int)value(body,len,2,1);if(audio_max_unacked<1||audio_max_unacked>32)audio_max_unacked=1;audio_ready=1;fprintf(stderr,"AUDIO_READY 48000 stereo PCM16 window=%d\n",audio_max_unacked);}}
-  else if(rx_ch==audio_channel&&id==0x8004){int ack=(int)value(body,len,2,1);audio_unacked=ack>audio_unacked?0:audio_unacked-ack;}
+  else if(rx_ch==audio_channel&&id==0x8003)audio_on_config(body,len);
+  else if(rx_ch==audio_channel&&id==0x8004)audio_on_ack(body,len);
+  else if(rx_ch==audio_channel&&id==0x800b){if(audio_underflows++%25==0)session_trace("RX audio underflow n=%u sent=%u acks=%u",audio_underflows,audio_sent,audio_acks);}
   else if(rx_ch==input_channel&&id==8){if(value(body,len,1,999)!=0){fprintf(stderr,"Input channel rejected\n");return 1;}send_msg(input_channel,11,0x8002,"",0);}
   else if(rx_ch==input_channel&&id==0x8001)forward_touch(body,len);
   else if(rx_ch==video_ch&&id==8){if(value(body,len,1,999)!=0){fprintf(stderr,"Channel open rejected\n");return 1;}unsigned char setup[]={8,(unsigned char)selected_codec};send_msg(video_ch,11,0x8000,setup,sizeof setup);}
   else if(rx_ch==video_ch&&id==0x8003){if(value(body,len,1,0)!=2){fprintf(stderr,"Video not ready\n");return 1;}max_unacked=(int)value(body,len,2,1);if(max_unacked<1||max_unacked>32)max_unacked=1;unsigned char begin[]={8,1,16,(unsigned char)selected_video_config},focus[]={16,1};send_msg(video_ch,11,0x8001,begin,sizeof begin);send_msg(video_ch,11,0x8007,focus,sizeof focus);running=1;}
-  else if(rx_ch==video_ch&&id==0x8008)focused=value(body,len,1,0)==1;
+  else if(rx_ch==video_ch&&id==0x8008){focused=value(body,len,1,0)==1;
+   if(!focused){codec_config_pending=1;lost_focus=frames>0;}
+   else if(lost_focus){
+    /* Back from the native screen the Uconnect waits for a new video SETUP (its focus manager enters
+     * WAITING_AA_GAL_VIDEO_SETUP); CONFIG then restarts the stream from a fresh IDR. */
+    lost_focus=0;running=0;unacked=0;codec_config_pending=1;need_idr=carplay_seen;
+    unsigned char setup[]={8,(unsigned char)selected_codec};send_msg(video_ch,11,0x8000,setup,sizeof setup);session_trace("VIDEO_RESETUP");
+    if(need_idr)request_keyframe();
+   }
+   session_trace("VIDEO_FOCUS %s",focused?"projected":"native");
+  }
   else if(rx_ch==video_ch&&id==0x8004){int ack=(int)value(body,len,2,1);unacked=ack>unacked?0:unacked-ack;}
  }
  mic_wanted=0;microphone_request();
+ session_trace("SESSION_END frames=%d stop=%d",frames,(int)stop);
  fprintf(stderr,"AA test finished: %d frames emitted\n",frames);close(fd);return frames>0?0:1;
 }

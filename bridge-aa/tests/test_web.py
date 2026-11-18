@@ -23,12 +23,13 @@ try:
  assert req('PUT','/name','Fiat',{'Origin':'http://other.invalid'})[0]==403
  assert req('GET','/name')==(200,b'Peugeot')
  assert req('GET','/')[0]==200
- defaults={'sidebar':'left','return_button':True,'touch':True,'fps':30,'theme':'auto','assist_buttons':True,'max_resolution':0,'scale_percent':100}
+ defaults={'sidebar':'left','return_button':True,'touch':True,'fps':30,'theme':'auto','assist_buttons':True,'max_resolution':0,'scale_percent':100,'inset_top':'auto','inset_bottom':'auto','h264_poc2':True}
  assert json.loads(req('GET','/options')[1])==defaults
- assert req('PUT','/options','sidebar=right\nreturn_button=false\ntouch=false\nfps=15\ntheme=night\nassist_buttons=false\nmax_resolution=480\nscale_percent=125')[0]==200
- chosen={'sidebar':'right','return_button':False,'touch':True,'fps':15,'theme':'night','assist_buttons':False,'max_resolution':480,'scale_percent':125}
+ assert req('PUT','/options','sidebar=right\nreturn_button=false\ntouch=false\nfps=15\ntheme=night\nassist_buttons=false\nmax_resolution=480\nscale_percent=125\ninset_top=0\ninset_bottom=40\nh264_poc2=0')[0]==200
+ chosen={'sidebar':'right','return_button':False,'touch':True,'fps':15,'theme':'night','assist_buttons':False,'max_resolution':480,'scale_percent':125,'inset_top':'0','inset_bottom':'40','h264_poc2':False}
  assert json.loads(req('GET','/options')[1])==chosen
  assert req('PUT','/options','fps=99')[0]==400
+ assert req('PUT','/options','inset_bottom=900')[0]==400
  assert json.loads(req('GET','/options')[1])==chosen
  # A server restart must reload the stored options and logo.
  p.terminate();p.wait()

@@ -7,8 +7,14 @@ pub fn identity()->(String,Vec<u8>,u32,u32){
  let (w,h)=dimensions(&logo).unwrap();(name,logo,w,h)
 }
 #[derive(Clone,Debug)]
-pub struct Options {pub scale_percent:u32,pub max_resolution:u32,pub right_bar:bool,pub assist_buttons:bool,pub return_button:bool,pub touch:bool,pub fps:u8,pub theme:String}
-impl Default for Options {fn default()->Self{Self{scale_percent:100,max_resolution:0,right_bar:false,assist_buttons:true,return_button:true,touch:true,fps:30,theme:"auto".into()}}}
+pub struct Options {pub scale_percent:u32,pub max_resolution:u32,pub right_bar:bool,pub assist_buttons:bool,pub return_button:bool,pub touch:bool,pub fps:u8,pub theme:String,
+ /// Pixels hidden by the head unit at the top/bottom of the AA video; None follows the AA margin.
+ pub inset_top:Option<u16>,pub inset_bottom:Option<u16>,
+ /// Read by aa-phone-v821: rewrite the iPhone H.264 stream to POC type 2 for the Uconnect VPU.
+ pub h264_poc2:bool}
+impl Default for Options {fn default()->Self{Self{scale_percent:100,max_resolution:0,right_bar:false,assist_buttons:true,return_button:true,touch:true,fps:30,theme:"auto".into(),inset_top:None,inset_bottom:None,h264_poc2:true}}}
+fn parse_inset(v:&str)->Result<Option<u16>,()>{if v=="auto"{return Ok(None);}let n:u16=v.parse().map_err(|_|())?;if n>200{return Err(());}Ok(Some(n))}
+fn inset_json(v:Option<u16>)->String{v.map_or("auto".into(),|n|n.to_string())}
 impl Options{pub fn physical_size(&self,w:u16,h:u16)->(u32,u32){let width=16000/self.scale_percent;(width,(width*h as u32/w.max(1) as u32).max(1))}}
 fn parse_options(text:&str)->Result<Options,()>{let mut o=Options::default();for line in text.lines(){if line.trim().is_empty(){continue;}let (key,value)=line.split_once('=').ok_or(())?;match(key.trim(),value.trim()){
  ("scale_percent",v) if ["75","85","100","115","125","150"].contains(&v)=>o.scale_percent=v.parse().map_err(|_|())?,
@@ -18,10 +24,12 @@ fn parse_options(text:&str)->Result<Options,()>{let mut o=Options::default();for
  ("touch","true")=>o.touch=true,("touch","false")=>o.touch=false,
  ("assist_buttons","true")=>o.assist_buttons=true,("assist_buttons","false")=>o.assist_buttons=false,
  ("fps",v) if ["10","15","20","30"].contains(&v)=>o.fps=v.parse().map_err(|_|())?,
- ("theme",v) if ["auto","day","night"].contains(&v)=>o.theme=v.into(),_=>return Err(())
+ ("theme",v) if ["auto","day","night"].contains(&v)=>o.theme=v.into(),
+ ("inset_top",v)=>o.inset_top=parse_inset(v)?,("inset_bottom",v)=>o.inset_bottom=parse_inset(v)?,
+ ("h264_poc2","1")=>o.h264_poc2=true,("h264_poc2","0")=>o.h264_poc2=false,_=>return Err(())
  }}Ok(o)}
 pub fn options()->Options{std::fs::read_to_string(dir().join("options.txt")).ok().and_then(|s|parse_options(&s).ok()).unwrap_or_default()}
-fn options_json()->String{let o=options();format!(r#"{{"sidebar":"{}","return_button":{},"touch":true,"fps":{},"theme":"{}","assist_buttons":{},"max_resolution":{},"scale_percent":{}}}"#,if o.right_bar{"right"}else{"left"},o.return_button,o.fps,o.theme,o.assist_buttons,o.max_resolution,o.scale_percent)}
+fn options_json()->String{let o=options();format!(r#"{{"sidebar":"{}","return_button":{},"touch":true,"fps":{},"theme":"{}","assist_buttons":{},"max_resolution":{},"scale_percent":{},"inset_top":"{}","inset_bottom":"{}","h264_poc2":{}}}"#,if o.right_bar{"right"}else{"left"},o.return_button,o.fps,o.theme,o.assist_buttons,o.max_resolution,o.scale_percent,inset_json(o.inset_top),inset_json(o.inset_bottom),o.h264_poc2)}
 fn dimensions(b:&[u8])->Option<(u32,u32)>{
  if b.len()<33||b.len()>128*1024||&b[..8]!=b"\x89PNG\r\n\x1a\n"||&b[12..16]!=b"IHDR"{return None;}
  let w=u32::from_be_bytes(b[16..20].try_into().ok()?);let h=u32::from_be_bytes(b[20..24].try_into().ok()?);

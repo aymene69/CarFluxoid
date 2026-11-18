@@ -10,6 +10,10 @@ chmod 600 "$work/state/"*
 . "$work/wifi-env.sh"
 export AA_VIDEO_SOCKET="$work/video.sock"
 attempts=0
+bus=${AA_DBUS_SOCKET:-/run/dbus/system_bus_socket}
+echo 'AA_RADIO_WAIT_DBUS: USB continues independently'
+while [ ! -S "$bus" ];do sleep 1;done
+echo AA_RADIO_DBUS_READY
 while :;do
  if ! pidof bluetoothd >/dev/null 2>&1 && [ "$attempts" -lt 3 ];then
   attempts=$((attempts+1))

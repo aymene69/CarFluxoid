@@ -4,7 +4,7 @@ import subprocess,os,json,shutil,tempfile
 root=Path('/input');build=Path('/build/aa');host=build/'mbedtls-host'
 if not host.exists():shutil.copytree(build/'mbedtls-rv',host,ignore=shutil.ignore_patterns('*.o','*.a','*.so'))
 subprocess.run(['make','-C',str(host),'-j4','lib'],check=True,stdout=subprocess.DEVNULL)
-for name in ['parser','microphone','video_config','aoa','reader_eof','live_restart']:
+for name in ['parser','microphone','video_config','audio_flow','aoa','mtp','reader_eof','live_restart']:
  binary=build/('test-'+name)
  subprocess.run(['cc','-DSYS_io_pgetevents_time64=SYS_io_pgetevents','-I'+str(host/'include'),str(root/'bridge-aa/tests'/f'{name}.c'),*[str(host/'library'/('lib'+n+'.a')) for n in ['mbedtls','mbedx509','mbedcrypto']],'-lpthread','-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
@@ -32,3 +32,12 @@ for mode in ['0','1']:
   for name in ['usb-rx.bin','aa-rx.bin']:
    assert (Path(directory)/name).exists()==(mode=='1'),(mode,name)
 print('RV32 production mode creates no capture files; diagnostic opt-in verified.')
+
+subprocess.run(['python3','/input/bridge-aa/tests/test_mtp_runtime.py'],check=True,env={**os.environ,'AA_MTP_TEST_COMMAND':'qemu-riscv32 -L /build/firmware-root /input/local/artifacts/aa-phone-v821'})
+
+# The 800x480 waiting screen must carry the exact codec configuration CarPlay sends after the
+# POC type 2 rewrite: the Uconnect keeps the first configuration of a session.
+iphone_config=bytes.fromhex('000000012764001fac12ca0641ed37010d0606d044232c0000000128ee3cb0')
+waiting=(root/'assets/waiting/attente-800x480.h264').read_bytes()
+assert waiting.startswith(iphone_config) and waiting.count(iphone_config)==2,'800x480 waiting screen is not under the CarPlay configuration'
+print('800x480 waiting screen shares the CarPlay codec configuration.')

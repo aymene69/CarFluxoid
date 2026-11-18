@@ -55,14 +55,26 @@ sleep 1
 stage=charger_module_queue
 usb_mode=${AA_USB_MODE:-negotiated}
 if [ -z "${AA_USB_MODE:-}" ] && [ -f /persist/aa-settings/usb-mode ];then usb_mode=$(cat /persist/aa-settings/usb-mode);fi
-case "$usb_mode" in direct) pre=0;; negotiated) pre=1;; *) echo 'Invalid USB mode';exit 1;; esac
-insmod "$base/aa_bulk.ko" pre_accessory="$pre"
+legacy=0
+case "$usb_mode" in direct) pre=0;; negotiated) pre=1;; legacy) pre=1;legacy=1;; *) echo 'Invalid USB mode';exit 1;; esac
+protocol=${AA_AOA_PROTOCOL:-2}
+if [ -z "${AA_AOA_PROTOCOL:-}" ] && [ -f /persist/aa-settings/aoa-protocol ];then protocol=$(cat /persist/aa-settings/aoa-protocol);fi
+case "$protocol" in 1|2) ;; *) echo 'Invalid AOA transport profile';exit 1;; esac
+fallback=0
+if [ "$legacy" = 1 ];then fallback=${AA_MTP_FALLBACK_MS:-8000};fi
+case "$fallback" in ''|*[!0-9]*) echo 'Invalid MTP fallback delay';exit 1;; esac
+insmod "$base/aa_bulk.ko" pre_accessory="$pre" aoa_protocol="$protocol" legacy_mtp="$legacy" mtp_fallback_ms="$fallback"
+echo "AA_AOA_PROTOCOL=$protocol"
 echo "AA_USB_MODE=$usb_mode"
 loaded=1
 [ -c /dev/aa_bulk ]
 echo 'AA_USB_BOUND : pilote AA noyau actif. DHU Google attendu. Huit requêtes RX préallouées.'
 stage=session_android_auto
+# One sender owns the video sockets across MTP -> AOA: CarPlay stays connected.
+if [ "$legacy" = 1 ];then export AA_MTP_DISCOVERY=1;else unset AA_MTP_DISCOVERY;fi
 export AA_USB_FAST_READ=1 AA_AUTONOMOUS=1 AA_WAIT_SCREEN_DIR="$base"
+# Session events reach flash immediately: the head unit may cut VBUS on failure.
+mkdir -p /persist/aa-diagnostics && export AA_SESSION_TRACE=/persist/aa-diagnostics/session.log || true
 # Wireless reception must remain available even if the head unit never starts AA.
 if [ "${AA_RADIO_EXTERNAL:-0}" != 1 ];then
  ./catplay-aa-rx "$base/state" "$SSID" "$AA_VIDEO_SOCKET" > "$base/carplay.log" 2>&1 &

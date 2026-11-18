@@ -44,8 +44,8 @@
     "beta_kernel_raw_sha256": "14f8677b8c57a291e8d7045a43d110e4037cb113851dab226a3deb1cc6f47214",
     "module_config_sha256": "030cdad200478e6ca0291a39493f152351f4aee134e9576a567f75aab4a05043",
     "exports_sha256": "62a3e3866f0c60463527249555ff485b7f8725442920da69ce229f9e7ddfca30",
-    "module_text_sha256": "9a04a4697b9b07892fef948fd2efa53d0d165563c06643bd19c2b131a6809e2f",
+    "module_text_sha256": "1fb8956f762d23306808f30f847f88dc84c8b73bf74be8d399ef77a4baf2d0d4",
     "hardware_tested_module_text_sha256": "359388ed97e1608a1796c65694086139bd55fd4e1ea2f84d887f70f117e2967b",
-    "module_validation": "compiled and host-tested; new AOA hardware behavior pending"
+    "module_validation": "f994377c plus accessory iInterface \"Android Accessory Interface\" (only bind() differs, reproduced build); Uconnect trial pending"
   }
 }

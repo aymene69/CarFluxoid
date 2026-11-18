@@ -21,5 +21,24 @@ int main(void){
  assert(find_video(hevc_first,12)==-1); /* Never reinterpret HEVC as H264. */
  unsetenv("AA_VIDEO_SOCKET");
  assert(find_video(hevc_first,sizeof hevc_first)==3&&selected_codec==7);
- unlink(path);puts("Resolution cap, nonzero configuration index, automatic mode and receiver fallback: PASS");
+ unlink(path);
+ unsigned char unit[]={0,0,0,1,0x67,0x42,0xc0,0x1e,0,0,0,1,0x68,0xce,0x3c,0x80,0,0,1,6,5,1,0x80,0,0,0,1,0x65,0x88,0x84},out[sizeof unit];size_t config_size;
+ assert(split_parameter_sets(unit,sizeof unit,out,sizeof out,&config_size)==7&&config_size==16);
+ assert(!memcmp(config_scratch,unit,16)&&!memcmp(out,unit+23,7)); /* SEI dropped, IDR kept */
+ unsigned char two[]={0,0,0,1,0x67,0x42,0,0,0,1,0x68,0xce,0,0,0,1,0x65,0x88,0,0,0,1,0x67,0x42,0,0,0,1,0x68,0xce,0,0,0,1,0x65,0xb8};
+ waiting_video=two;waiting_size=sizeof two;index_waiting_units();
+ assert(waiting_units==2&&waiting_unit_off[0]==0&&waiting_unit_len[0]==18&&waiting_unit_off[1]==18&&waiting_unit_len[1]==18);
+ waiting_video=NULL;waiting_size=0;
+ unsigned char slice[]={0,0,0,1,0x41,0x9a,0x10};
+ assert(split_parameter_sets(slice,sizeof slice,out,sizeof out,&config_size)==sizeof slice&&!config_size&&!memcmp(out,slice,sizeof slice));
+ assert(has_idr(unit,sizeof unit)&&!has_idr(slice,sizeof slice)); /* CarPlay resumes only on an IDR */
+ /* Real iPhone CarPlay SPS (POC type 0, VUI max_num_reorder_frames 0): rewritten to POC type 2,
+  * byte result checked against ffmpeg's parser offline. A SPS without VUI reorder info is kept. */
+ unsigned char iphone_sps[]={0x27,0x64,0x00,0x1f,0xac,0x13,0x14,0x50,0x32,0x0f,0x69,0xb8,0x08,0x68,0x30,0x36,0x82,0x21,0x19,0x60};
+ unsigned char poc2_sps[]={0x27,0x64,0x00,0x1f,0xac,0x12,0xca,0x06,0x41,0xed,0x37,0x01,0x0d,0x06,0x06,0xd0,0x44,0x23,0x2c};
+ unsigned char rewritten[64];
+ assert(poc_rewrite_sps(iphone_sps,sizeof iphone_sps,rewritten,sizeof rewritten,0)==sizeof poc2_sps&&!memcmp(rewritten,poc2_sps,sizeof poc2_sps)&&poc_state.active);
+ unsigned char no_vui[]={0x27,0x64,0x00,0x1f,0xac,0x13,0x14,0x50,0x32,0x0f,0x64};
+ assert(!poc_rewrite_sps(no_vui,sizeof no_vui,rewritten,sizeof rewritten,0)&&!poc_state.active);
+ puts("Resolution cap, nonzero configuration index, automatic mode, receiver fallback, SPS/PPS codec config split, waiting IDR alternation and POC type 2 rewrite: PASS");
 }

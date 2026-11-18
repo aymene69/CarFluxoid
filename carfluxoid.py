@@ -14,11 +14,11 @@ def xfel():
 def tls():
  # This is a published reference identity, not a device-specific MFi certificate.
  folder=ROOT/'local/tls';private_dir(folder)
- base='https://raw.githubusercontent.com/mretallack/AndroidAuto/84a28ab315f905d10ae208a8c90209734a9b047c/app/src/main/assets/'
- for name,digest in [('cert','327ee23a2af9d8a01cac30978525ac3a4623d86be1ea2fcaf063a05e419596cd'),('key','6e1c8e6cf1325f8147db557b2ef2c860f58e9873809d21151170d26f479ad775')]:
+ base='https://raw.githubusercontent.com/iscle/android-auto-certificates/8dc25fe2bd2c57e0c6f48488bb1095ecc0c11e31/android-auto/latest/'
+ for name,digest in [('cert','43c05285265d83a9e1ae74da7359f07c081c711354a2c397292419169d8c360f'),('key','e30eade4b8f3384b739400a988be494d639e92264e8f60414f17c4c931f333e2')]:
   p=folder/f'test-{name}.pem'
   if p.exists():continue
-  with urllib.request.urlopen(base+f'carservice_{name}.pem',timeout=60) as r:data=r.read()
+  with urllib.request.urlopen(base+('certificate.pem' if name=='cert' else 'private-key.pem'),timeout=60) as r:data=r.read()
   if hashlib.sha256(data).hexdigest()!=digest:raise RuntimeError('Reference TLS checksum mismatch')
   write_private(p,data)
  cert=subprocess.check_output(['openssl','x509','-in',str(folder/'test-cert.pem'),'-pubkey','-noout'])

@@ -11,12 +11,13 @@ for iphone in /sys/class/iphone/*; do
   if echo 0 > "$iphone/bind";then echo "AA_STOCK_USB_RELEASED: $iphone";else echo "AA_STOCK_USB_RELEASE_FAILED: $iphone";fi
  fi
 done
-i=0
-while [ "$i" -lt 90 ]; do
- if [ -S /run/dbus/system_bus_socket ]; then break;fi
- i=$((i+1));sleep 1
-done
-[ "$i" -lt 90 ] || { echo 'AA_BOOT_FAILED: D-Bus unavailable (see persist diagnostics)';exit 1; }
+# USB does not depend on D-Bus. The radio worker waits for its own dependency.
+echo 'AA_USB_START: independent of D-Bus/radio readiness'
+# Optional frozen candidate profile; ordinary builds retain the user's profile.
+if [ -f /usr/lib/aa-bridge/usb-profile ];then
+ AA_USB_MODE=$(cat /usr/lib/aa-bridge/usb-profile)
+ case "$AA_USB_MODE" in legacy|direct|negotiated) export AA_USB_MODE;; *) echo AA_INVALID_USB_PROFILE;exit 1;; esac
+fi
 export AA_DIAGNOSTIC=${AA_DIAGNOSTIC:-0}
 work=/tmp/aa-autoboot
 mkdir -p "$work"

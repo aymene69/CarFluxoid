@@ -72,11 +72,25 @@ impl ScreenReceiverSink for Screen {
  }
 }
 impl AsyncShutdown for Screen {}
-fn display_size()->(u16,u16) {
+fn display_values()->Vec<u16> {
  let path=std::env::var("AA_VIDEO_SOCKET").unwrap_or_default()+".display";
- let data=std::fs::read_to_string(path).unwrap_or_default();
- let mut values=data.split_whitespace().filter_map(|v|v.parse::<u16>().ok());
- match (values.next(),values.next()){(Some(w),Some(h)) if w>=320&&h>=240=>(w,h),_=>(800,480)}
+ std::fs::read_to_string(path).unwrap_or_default().split_whitespace().filter_map(|v|v.parse::<u16>().ok()).collect()
+}
+fn display_size()->(u16,u16) {
+ match display_values()[..] {[w,h,..] if w>=320&&h>=240=>(w,h),_=>(800,480)}
+}
+/// Width and height margins announced by the AA head unit for the selected video configuration.
+fn display_margins()->(u16,u16) {
+ match display_values()[..] {[_,_,mw,mh,..]=>(mw,mh),_=>(0,0)}
+}
+/// The Uconnect overlays its status bar on part of the AA video: CarPlay keeps its UI in the visible
+/// rectangle. Defaults to the AA height margin at the bottom; inset_top/inset_bottom override it.
+fn visible_area(options:&web::Options,w:u16,h:u16)->Option<catplay_carplay::msg::ViewArea> {
+ let (_,margin_h)=display_margins();
+ let top=options.inset_top.unwrap_or(0);let bottom=options.inset_bottom.unwrap_or(margin_h);
+ if top==0&&bottom==0||top as u32+bottom as u32+120>h as u32{return None;}
+ let safe=catplay_carplay::msg::SafeArea{origin_x_pixels:0,origin_y_pixels:top.into(),width_pixels:w.into(),height_pixels:(h-top-bottom).into()};
+ Some(catplay_carplay::msg::ViewArea{origin_x_pixels:0,origin_y_pixels:0,width_pixels:w.into(),height_pixels:h.into(),safe_area:Some(safe),view_area_status_bar_edge:None})
 }
 fn touch_device()->catplay_carplay::msg::HidDevice {
  catplay_carplay::msg::HidDevice {display_uuid:"92EF87D8-88E6-48CD-83A0-7498C886774C".into(),name:"Bridge touchscreen".into(),uuid:"B9B32748-EDAB-494A-A3F1-65A16450C1DE".into(),hid_descriptor:catplay_hid::TouchScreenSingleReport::descriptor(display_size().0-1,display_size().1-1).to_vec().into(),..Default::default()}
@@ -105,6 +119,8 @@ impl AirPlayReceiverSink for Receiver {
 
    let mut packet=[0u8;64];
    while let Ok(n)=input.recv(&mut packet).await {
+    // The AA sender asks for a fresh IDR after the head unit dropped or refused frames.
+    if n==1&&packet[0]==0x10{handle.request_keyframe();log::info!("KEYFRAME requested by AA sender");continue;}
     if n!=5||packet[0]>1{continue;}
     let x=u16::from_le_bytes([packet[1],packet[2]]);let y=u16::from_le_bytes([packet[3],packet[4]]);
     let (w,h)=display_size();if x>=w||y>=h{continue;}
@@ -147,7 +163,8 @@ impl AirPlayReceiverSink for Receiver {
   // Retain CatPlay audio capabilities; PCM is forwarded to the AA media sink.
   info.hid_devices.push(touch_device());
   let (w,h)=display_size();let (physical_w,physical_h)=options.physical_size(w,h);log::info!("CP_DISPLAY negotiated {}x{} scale={} physical={}x{}mm",w,h,options.scale_percent,physical_w,physical_h);
-  info.displays=vec![Display{width_pixels:w.into(),height_pixels:h.into(),width_physical:physical_w.into(),height_physical:physical_h.into(),max_fps:Some(options.fps.into()),primary_input_device:Some(catplay_carplay::msg::PrimaryInputDevice::TouchScreen),features:if options.assist_buttons{catplay_carplay::msg::DisplayFeature::LOWFI_TOUCH}else{catplay_carplay::msg::DisplayFeature::HIGHFI_TOUCH},uuid:"92EF87D8-88E6-48CD-83A0-7498C886774C".into(),..Default::default()}];
+  let view_area=visible_area(&options,w,h);log::info!("CP_VIEW_AREA margins={:?} safe={:?}",display_margins(),view_area.as_ref().and_then(|v|v.safe_area.as_ref()).map(|a|(a.origin_y_pixels,a.height_pixels)));
+  info.displays=vec![Display{width_pixels:w.into(),height_pixels:h.into(),width_physical:physical_w.into(),height_physical:physical_h.into(),max_fps:Some(options.fps.into()),primary_input_device:Some(catplay_carplay::msg::PrimaryInputDevice::TouchScreen),features:if options.assist_buttons{catplay_carplay::msg::DisplayFeature::LOWFI_TOUCH}else{catplay_carplay::msg::DisplayFeature::HIGHFI_TOUCH},uuid:"92EF87D8-88E6-48CD-83A0-7498C886774C".into(),initial_view_area:view_area.as_ref().map(|_|0),view_areas:view_area.map(|v|vec![v]),..Default::default()}];
  }
  async fn open_microphone(&mut self,_:catplay_carplay::msg::StreamType,_:catplay_carplay::msg::AudioType,_:catplay_carplay::audio::AudioStreamBasicDescription)->RtspResult<catplay_carplay::audio::AudioRecorderBox<i16>>{
   Ok(Box::new(microphone::Microphone::new(&self.socket)?))
