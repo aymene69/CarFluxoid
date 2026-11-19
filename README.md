@@ -38,7 +38,7 @@ The Raspberry Pi target runs on **Raspberry Pi OS Lite 64-bit** and connects to 
 
 - The projected dashboard starts on a menu with **Démarrer CarPlay**, settings, and a return to the head unit. Both CarPlay actions can bring up the Wi-Fi access point.
 - The connection screen has a **Retour au menu** button. Disconnecting the iPhone during projection returns to the menu.
-- CarPlay projection, music playback and touch have been exercised with Google DHU. The latest logo and Wi-Fi changes still need an end-to-end test on a physical Pi and iPhone. Coverage on real head units varies.
+- CarPlay projection, music playback and touch have been exercised with Google DHU. The custom return tile was verified on an iPhone after removing and pairing CarFluxoid again. The latest Wi-Fi automation still needs a hardware check. Coverage on real head units varies.
 
 [**Raspberry Pi setup and build**](platforms/raspberrypi/README.md) · [Projected dashboard](platforms/raspberrypi/dashboard/README.md)
 

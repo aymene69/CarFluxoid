@@ -6,6 +6,8 @@ The menu can set the CarPlay bar position, appearance and requested FPS. **Redé
 
 Use the web settings page to upload the logo. The receiver supplies 120, 180 and 256 px PNGs in the CarPlay manufacturer artwork array. After saving, use **Redémarrer CarPlay** to open a new session that advertises the new artwork. `journalctl -u carfluxoid-radio | grep CP_OEM_ARTWORK` reports whether the receiver loaded the custom file or used the bundled one, with a digest prefix and the advertised sizes.
 
+If the car tile still shows the previous image, open **Settings → General → CarPlay** on the iPhone, select CarFluxoid, and tap **Forget This Car**. Pair CarFluxoid again and accept CarPlay. This recovered the custom Fiat artwork on a physical iPhone. [Apple’s guide to pairing CarPlay again](https://support.apple.com/105109)
+
 The USB bridge requests Android Auto input events for calls, media, Siri, navigation, volume and rotary controls. The head unit decides which controls to send to the projection session. To check what the car forwards, press its controls in CarPlay and run `sudo grep -E 'AA_BUTTON|AA_AXIS' /run/carfluxoid/session.log` before unplugging the Pi. `mapped=0` flags a code that needs a mapping.
 
 The Pi service renders a new frame when the contents or negotiated resolution change. Those frames reuse the H.264 configuration of the known waiting assets. Touch events reach the dashboard only while it is displayed. When resuming CarPlay the bridge requests a new IDR before sending dependent pictures. Installations without a configured dashboard keep their original connection screen and native return path.

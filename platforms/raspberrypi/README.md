@@ -92,6 +92,6 @@ The C transport already has independent USB-reading and processing threads. `AA_
 - Receiver self-test passed on the Pi; USB module loaded and device node appeared after reboot.
 - On the physical Pi, Google DHU displayed the menu and the iPhone projection. Audio and touch were exercised.
 - A local DHU-over-TCP test exercised menu startup, the connection screen, **Retour au menu**, and returning to the menu after simulated iPhone video ended.
-- The ARM64 test suite verified the web-uploaded artwork in the serialized CarPlay response. The final appearance of the custom tile on the iPhone and the latest Wi-Fi automation still require hardware checks.
+- The ARM64 test suite verified the web-uploaded artwork in the serialized CarPlay response. The iPhone displayed the custom Fiat tile after CarFluxoid was removed and paired again. The latest Wi-Fi automation still requires a hardware check.
 
 Sustained audio quality, microphone reliability, steering-wheel controls and real head unit coverage remain under test.
