@@ -1,9 +1,12 @@
 #!/bin/sh
 set -eu
+work=/tmp/aa-autoboot
+mkdir -p "$work"
+export AA_WEB_LOG="$work/web.log"
 # Restore time and start boot diagnostics before waiting for USB or radios.
 export AA_CLOCK_SYNC=1
 /bin/sh /usr/lib/aa-bridge/clock-service.sh --restore
-setsid /bin/sh /usr/lib/aa-bridge/clock-service.sh </dev/null >>/var/log/aa-bridge-boot.log 2>&1 &
+setsid /bin/sh /usr/lib/aa-bridge/clock-service.sh </dev/null >>"$work/boot.log" 2>&1 &
 setsid /bin/sh /usr/lib/aa-bridge/vehicle-log.sh </dev/null >/dev/null 2>&1 &
 # Release the stock Apple presentation early: the car must see our Android role.
 for iphone in /sys/class/iphone/*; do
@@ -33,6 +36,6 @@ done
 setsid /bin/sh /usr/lib/aa-bridge/log-maintenance.sh </dev/null >/dev/null 2>&1 &
 setsid /bin/sh /usr/lib/aa-bridge/web-service.sh </dev/null >/dev/null 2>&1 &
 export AA_RADIO_EXTERNAL=1
-setsid /bin/sh /usr/lib/aa-bridge/radio-service.sh </dev/null >>/var/log/aa-bridge-boot.log 2>&1 &
+setsid /bin/sh /usr/lib/aa-bridge/radio-service.sh </dev/null >>"$work/boot.log" 2>&1 &
 echo 'AA_BOOT_READY: launching bridge; beta kernel unchanged'
 exec /bin/sh "$work/usb-test.sh"

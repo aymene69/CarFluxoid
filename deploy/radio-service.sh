@@ -4,8 +4,15 @@ work=${AA_RADIO_WORK:-/tmp/aa-autoboot}
 cd "$work" || exit 1
 mkdir -p "$work/state" || exit 1
 chmod 700 "$work/state"
-for n in certificate.p7b identity.pk8;do cp "/persist/$n" "$work/state/" || exit 1;done
-[ ! -f /persist/homekit_rx_db.bin ] || cp /persist/homekit_rx_db.bin "$work/state/"
+persist=${AA_RADIO_PERSIST:-/persist}
+missing=0
+while [ ! -s "$persist/certificate.p7b" ] || [ ! -s "$persist/identity.pk8" ];do
+ if [ "$missing" -eq 0 ];then echo 'AA_RADIO_WAIT_MFI: certificate/key missing or empty; Android Auto remains independent';fi
+ missing=$(( (missing+1)%6 ));sleep 10
+done
+[ "$missing" -eq 0 ] || echo AA_RADIO_MFI_AVAILABLE
+for n in certificate.p7b identity.pk8;do cp "$persist/$n" "$work/state/" || exit 1;done
+[ ! -f "$persist/homekit_rx_db.bin" ] || cp "$persist/homekit_rx_db.bin" "$work/state/"
 chmod 600 "$work/state/"*
 . "$work/wifi-env.sh"
 export AA_VIDEO_SOCKET="$work/video.sock"

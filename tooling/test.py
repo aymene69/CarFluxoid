@@ -4,11 +4,12 @@ import subprocess,os,json,shutil,tempfile
 root=Path('/input');build=Path('/build/aa');host=build/'mbedtls-host'
 if not host.exists():shutil.copytree(build/'mbedtls-rv',host,ignore=shutil.ignore_patterns('*.o','*.a','*.so'))
 subprocess.run(['make','-C',str(host),'-j4','lib'],check=True,stdout=subprocess.DEVNULL)
-for name in ['parser','microphone','video_config','audio_flow','aoa','mtp','reader_eof','live_restart']:
+for name in ['parser','microphone','video_config','audio_flow','aoa','mtp','reader_eof','live_restart','car_controls']:
  binary=build/('test-'+name)
  subprocess.run(['cc','-DSYS_io_pgetevents_time64=SYS_io_pgetevents','-I'+str(host/'include'),str(root/'bridge-aa/tests'/f'{name}.c'),*[str(host/'library'/('lib'+n+'.a')) for n in ['mbedtls','mbedx509','mbedcrypto']],'-lpthread','-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
-env={**os.environ,'AA_WEB_TEST_COMMAND':'qemu-riscv32 -L /build/firmware-root /input/local/artifacts/catplay-aa-rx --web'}
+rx='qemu-riscv32 -L /build/firmware-root /input/local/artifacts/catplay-aa-rx'
+env={**os.environ,'AA_WEB_TEST_COMMAND':rx+' --web','AA_OEM_INFO_TEST_COMMAND':rx+' --oem-info'}
 subprocess.run(['python3','/input/bridge-aa/tests/test_web.py'],check=True,env=env)
 script=(root/'bridge-aa/build-carplay-rx.sh').read_text().replace('cargo" build --release','cargo" test --no-run --message-format=json --release').replace('-C panic=abort','-C panic=abort -Zpanic_abort_tests')
 p=build/'test-rx.sh';p.write_text(script)

@@ -2,7 +2,23 @@
 #include "../src/aa_phone.c"
 #undef main
 #include <assert.h>
+static void check_poc_bit_copy(void){
+ unsigned char source[2048];
+ for(size_t i=0;i<sizeof source;i++)source[i]=(unsigned char)(i*37+i/7);
+ struct poc_bits bits={source,sizeof source*8,0,0};
+ for(size_t from=0;from<8;from++)for(size_t prefix=0;prefix<8;prefix++)
+ for(size_t tail=0;tail<8;tail++){
+  unsigned char actual[2049]={0},expected[2049]={0};
+  struct poc_out fast={actual,sizeof actual,0,0},slow={expected,sizeof expected,0,0};
+  for(size_t i=0;i<prefix;i++){poc_put(&fast,1);poc_put(&slow,1);}
+  size_t end=sizeof source*8-tail;
+  poc_copy(&fast,&bits,from,end);
+  for(size_t i=from;i<end;i++)poc_put(&slow,source[i/8]>>(7-(i%8))&1);
+  assert(!fast.err&&fast.bits==slow.bits&&!memcmp(actual,expected,sizeof actual));
+ }
+}
 int main(void){
+ check_poc_bit_copy();
  char path[100];snprintf(path,sizeof path,"/tmp/aa-video-options-%ld",(long)getpid());setenv("AA_SETTINGS_FILE",path,1);
  unsigned char offer[]={10,18,8,2,26,14,8,3,34,2,8,3,34,2,8,1,34,2,8,2};
  FILE *f=fopen(path,"w");assert(f);fputs("max_resolution=480\n",f);fclose(f);
@@ -28,6 +44,17 @@ int main(void){
  unsigned char two[]={0,0,0,1,0x67,0x42,0,0,0,1,0x68,0xce,0,0,0,1,0x65,0x88,0,0,0,1,0x67,0x42,0,0,0,1,0x68,0xce,0,0,0,1,0x65,0xb8};
  waiting_video=two;waiting_size=sizeof two;index_waiting_units();
  assert(waiting_units==2&&waiting_unit_off[0]==0&&waiting_unit_len[0]==18&&waiting_unit_off[1]==18&&waiting_unit_len[1]==18);
+ assert(initial_projection_screen(1)==PROJECTION_MENU);
+ assert(initial_projection_screen(0)==PROJECTION_WAITING);
+ /* The waiting image stays ineligible between menu redraws, even long after startup. */
+ assert(!waiting_picture_due(PROJECTION_MENU,2000000,0));
+ assert(waiting_picture_due(PROJECTION_WAITING,2000000,0));
+ assert(!waiting_picture_due(PROJECTION_WAITING,2000000,3000000));
+ assert(!waiting_picture_due(PROJECTION_CARPLAY,2000000,0));
+ assert(projection_after_disconnect(PROJECTION_MENU,1)==PROJECTION_MENU);
+ assert(projection_after_disconnect(PROJECTION_WAITING,1)==PROJECTION_WAITING);
+ assert(projection_after_disconnect(PROJECTION_CARPLAY,1)==PROJECTION_MENU);
+ assert(projection_after_disconnect(PROJECTION_CARPLAY,0)==PROJECTION_WAITING);
  waiting_video=NULL;waiting_size=0;
  unsigned char slice[]={0,0,0,1,0x41,0x9a,0x10};
  assert(split_parameter_sets(slice,sizeof slice,out,sizeof out,&config_size)==sizeof slice&&!config_size&&!memcmp(out,slice,sizeof slice));

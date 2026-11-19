@@ -1,0 +1,29 @@
+[Unit]
+Description=CarFluxoid Android Auto transport (Raspberry Pi)
+After=systemd-modules-load.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+RuntimeDirectory=carfluxoid
+RuntimeDirectoryMode=0700
+WorkingDirectory=/run/carfluxoid
+Environment=AA_VIDEO_SOCKET=/run/carfluxoid/video.sock
+Environment=AA_SETTINGS_FILE=/var/lib/carfluxoid/settings/options.txt
+Environment=AA_WAIT_SCREEN_DIR=/opt/carfluxoid/assets
+Environment=AA_SESSION_TRACE=/run/carfluxoid/session.log
+Environment=AA_USB_FAST_READ=1
+Environment=AA_AUTONOMOUS=1
+Environment=AA_DIAGNOSTIC=0
+ExecStartPre=/sbin/modprobe dwc2
+ExecStartPre=/sbin/modprobe libcomposite
+ExecStartPre=/sbin/modprobe aa_bulk aoa_protocol=2
+ExecStart=/opt/carfluxoid/bin/aa-phone --raw /dev/aa_bulk /opt/carfluxoid/tls/test-cert.pem /opt/carfluxoid/tls/test-key.pem /opt/carfluxoid/assets/mire.h264
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

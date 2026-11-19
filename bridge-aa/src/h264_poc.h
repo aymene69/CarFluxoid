@@ -18,7 +18,27 @@ static void poc_se(struct poc_bits *b){poc_ue(b);}
 struct poc_out {unsigned char *p;size_t cap,bits;int err;};
 static void poc_put(struct poc_out *o,unsigned v){if(o->bits>=o->cap*8){o->err=1;return;}if(!(o->bits&7))o->p[o->bits>>3]=0;if(v)o->p[o->bits>>3]|=(unsigned char)(0x80>>(o->bits&7));o->bits++;}
 static void poc_copy(struct poc_out *o,const struct poc_bits *b,size_t from,size_t to){
- for(size_t i=from;i<to;i++)poc_put(o,b->p[i>>3]>>(7-(i&7))&1);
+ if(from>to||to>b->bits||o->bits>o->cap*8||to-from>o->cap*8-o->bits){
+  o->err=1;
+  return;
+ }
+ while(from<to&&(o->bits&7)){
+  poc_put(o,b->p[from>>3]>>(7-(from&7))&1);
+  from++;
+ }
+ size_t bytes=(to-from)/8;
+ unsigned shift=from&7;
+ const unsigned char *source=b->p+from/8;
+ unsigned char *target=o->p+o->bits/8;
+ if(bytes&&!shift)memcpy(target,source,bytes);
+ else for(size_t i=0;i<bytes;i++)
+  target[i]=(unsigned char)((source[i]<<shift)|(source[i+1]>>(8-shift)));
+ from+=bytes*8;
+ o->bits+=bytes*8;
+ while(from<to){
+  poc_put(o,b->p[from>>3]>>(7-(from&7))&1);
+  from++;
+ }
 }
 static size_t poc_unescape(const unsigned char *in,size_t n,unsigned char *out){
  size_t k=0,zeros=0;for(size_t i=0;i<n;i++){if(zeros>=2&&in[i]==3){zeros=0;continue;}out[k++]=in[i];zeros=in[i]?0:zeros+1;}return k;

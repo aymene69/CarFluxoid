@@ -1,0 +1,13 @@
+# CarFluxoid dashboard for Raspberry Pi
+
+Android Auto starts on the CarFluxoid menu. **Démarrer CarPlay** activates the CarFluxoid Wi-Fi access point if needed, starts the wireless receiver, and shows the connection screen until the iPhone provides video. **Retour au menu** leaves that screen while the Pi waits. An already connected iPhone can resume immediately. The OEM tile in CarPlay opens the menu again, as does disconnecting the iPhone during projection. **Retour à l’autoradio** requests the head unit's native video focus. The head unit decides whether to accept that request.
+
+The menu can set the CarPlay bar position, appearance and requested FPS. **Redémarrer CarPlay** activates the access point if needed and restarts the wireless CarPlay receiver. Android Auto stays connected. **Wi-Fi et Bluetooth** lets you type Wi-Fi and Bluetooth names. The Wi-Fi name applies the next time you activate the AP, and the Bluetooth name applies the next time CarPlay starts. Use 1–32 ASCII letters, numbers, spaces, dots, underscores or hyphens, starting with a letter or number.
+
+Use the web settings page to upload the logo. The receiver supplies 120, 180 and 256 px PNGs in the CarPlay manufacturer artwork array. After saving, use **Redémarrer CarPlay** to open a new session that advertises the new artwork. `journalctl -u carfluxoid-radio | grep CP_OEM_ARTWORK` reports whether the receiver loaded the custom file or used the bundled one, with a digest prefix and the advertised sizes.
+
+The USB bridge requests Android Auto input events for calls, media, Siri, navigation, volume and rotary controls. The head unit decides which controls to send to the projection session. To check what the car forwards, press its controls in CarPlay and run `sudo grep -E 'AA_BUTTON|AA_AXIS' /run/carfluxoid/session.log` before unplugging the Pi. `mapped=0` flags a code that needs a mapping.
+
+The Pi service renders a new frame when the contents or negotiated resolution change. Those frames reuse the H.264 configuration of the known waiting assets. Touch events reach the dashboard only while it is displayed. When resuming CarPlay the bridge requests a new IDR before sending dependent pictures. Installations without a configured dashboard keep their original connection screen and native return path.
+
+The RAM-only renderer uses Python, Pillow and FFmpeg with libx264. The ARM64 release contains both bridge binaries and is installed with the Pi online so dependencies can be installed. Image generation at 480p, 720p and 1080p and local navigation were checked. USB projection and focus transitions need hardware validation.

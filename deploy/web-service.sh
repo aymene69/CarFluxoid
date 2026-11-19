@@ -1,7 +1,7 @@
 #!/bin/sh
 # Independent supervisor: AA session completion must not stop configuration.
 work=${AA_WEB_WORK:-/tmp/aa-autoboot}
-log=${AA_WEB_LOG:-/var/log/aa-settings-web.log}
+log=${AA_WEB_LOG:-$work/web.log}
 lock=${AA_WEB_LOCK:-/tmp/aa-web-supervisor.lock}
 if ! mkdir "$lock" 2>/dev/null; then
  pid=$(cat "$lock/pid" 2>/dev/null || true)

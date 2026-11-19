@@ -163,3 +163,205 @@ index 0000000..abfff73
 +    assert_eq!(test.client.next_payload(), Some((SessionType::ExternalAccessory, vec![4, 5, 6])));
 +    assert!(!test.client.ea().has_tx_pending());
 +}
+diff --git a/core/catplay_hap/build.rs b/core/catplay_hap/build.rs
+index cbb8573..5f84902 100644
+--- a/core/catplay_hap/build.rs
++++ b/core/catplay_hap/build.rs
+@@ -124,6 +124,13 @@ fn write_openssl_asm_base_header(out_dir: &Path) {
+         "#ifndef OPENSSL_HEADER_ASM_BASE_H\n\
+          #define OPENSSL_HEADER_ASM_BASE_H\n\
+          #define _CET_ENDBR\n\
++         #if defined(OPENSSL_AARCH64)\n\
++         #if defined(__ARM_FEATURE_PAC_DEFAULT) || defined(__ARM_FEATURE_BTI_DEFAULT)\n\
++         #error ARM branch protection requires the full upstream asm header\n\
++         #endif\n\
++         #define AARCH64_SIGN_LINK_REGISTER\n\
++         #define AARCH64_VALIDATE_LINK_REGISTER\n\
++         #endif\n\
+          #endif\n",
+     )
+     .expect("failed to write OUT_DIR/openssl/asm_base.h");
+diff --git a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs b/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
+index bd489fd..446c2d0 100644
+--- a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
++++ b/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
+@@ -5,15 +5,18 @@ use std::{
+
+ use catplay_tokio::{UdpSession, UdpSocketPeer};
+ use catplay_util::{Deadline, EventSleeper};
+-use log::debug;
++use log::{debug, warn};
+
+ use crate::{
+     audio::{AudioPlayerBox, AudioPlayerEvent, codec::AudioDecoder},
+     cipher::AirPlayStreamEncryption,
+-    rtp::{AsRtpPacket, RtpAesCbcDecoder, RtpChaChaDecoder, RtpCipher, play::RtpPlayer},
++    rtp::{AsRtpPacket, RtpAesCbcDecoder, RtpChaChaDecoder, RtpCipher, RtpPacket, play::RtpPlayer},
+     rtsp_frame::{RtspError, RtspResult},
+ };
+
++const REORDER_WAIT: Duration = Duration::from_millis(60);
++const REORDER_MAX_PACKETS: usize = 16;
++
+ #[derive(EventSleeper)]
+ pub struct RtpSession<C: AudioDecoder> {
+     codec: RtpCipher,
+@@ -25,6 +28,12 @@ pub struct RtpSession<C: AudioDecoder> {
+     stopped: bool,
+     #[sleep]
+     start_deadline: Deadline,
++    #[sleep]
++    reorder_deadline: Deadline,
++    next_sequence: Option<u16>,
++    pending: Vec<(Instant, RtpPacket)>,
++    reordered: u64,
++    expired: u64,
+ }
+
+ impl<C: AudioDecoder> RtpSession<C> {
+@@ -71,6 +80,11 @@ impl<C: AudioDecoder> RtpSession<C> {
+             anchored: false,
+             stopped: false,
+             start_deadline: Deadline::Never,
++            reorder_deadline: Deadline::Never,
++            next_sequence: None,
++            pending: Vec::new(),
++            reordered: 0,
++            expired: 0,
+         };
+
+         me.start_playback_if_ready();
+@@ -103,6 +117,8 @@ impl<C: AudioDecoder> RtpSession<C> {
+         if !self.stopped {
+             self.stopped = true;
+             self.start_deadline = Deadline::Never;
++            self.reorder_deadline = Deadline::Never;
++            self.pending.clear();
+             if let Some(sink) = self.sink.as_mut() {
+                 sink.on_event(AudioPlayerEvent::Stop);
+             }
+@@ -122,21 +138,64 @@ impl<C: AudioDecoder> RtpSession<C> {
+         // TODO: detect player `read_head` stall, rewind and restart
+         // TODO: timeout when there are no incoming packets for too long
+
++        self.drain_reorder(Instant::now());
+         let packet = self.codec.decode(data)?;
+         debug!("New RTP packet: {:?}", packet.header());
++        let now = Instant::now();
++        let sequence = packet.header().sequence_number;
++        let expected = self.next_sequence.unwrap_or(sequence);
++        match sequence.wrapping_sub(expected) as i16 {
++            0 => {
++                if !self.pending.is_empty() {
++                    self.reordered += 1;
++                    if self.reordered == 1 || self.reordered % 16 == 0 {
++                        warn!("AUDIO_RTP_REORDER recovered={} expired={}", self.reordered, self.expired);
++                    }
++                }
++                self.deliver(&packet);
++            }
++            1.. => {
++                if self.pending.iter().any(|(_, p)| p.header().sequence_number == sequence) {
++                    return Ok(());
++                }
++                self.pending.push((now, packet.to_owned_packet()));
++            }
++            _ => return Ok(()),
++        }
++        self.drain_reorder(now);
++        self.start_playback_if_ready();
++        Ok(())
++    }
+
++    fn deliver(&mut self, packet: &dyn AsRtpPacket) {
++        self.next_sequence = Some(packet.header().sequence_number.wrapping_add(1));
+         if let Some(player) = self.player.as_mut() {
+             let written = player.total_written();
+-            player.push(&packet);
++            player.push(packet);
+             if player.total_written() != written {
+                 if let Some(sink) = self.sink.as_mut() {
+                     sink.on_event(AudioPlayerEvent::AddedDataToRing);
+                 }
+             }
+         }
+-        self.start_playback_if_ready();
++    }
+
+-        Ok(())
++    fn drain_reorder(&mut self, now: Instant) {
++        while !self.pending.is_empty() {
++            let expected = self.next_sequence.expect("first RTP packet is delivered immediately");
++            let deadline = self.pending.iter().map(|(at, _)| *at).min().unwrap() + REORDER_WAIT;
++            let (index, distance) = self.pending.iter().enumerate()
++                .map(|(i, (_, p))| (i, p.header().sequence_number.wrapping_sub(expected)))
++                .min_by_key(|&(_, distance)| distance).unwrap();
++            if distance != 0 && now < deadline && self.pending.len() < REORDER_MAX_PACKETS {
++                self.reorder_deadline = Deadline::new(deadline);
++                return;
++            }
++            self.expired += u64::from(distance);
++            let (_, packet) = self.pending.swap_remove(index);
++            self.deliver(&packet);
++        }
++        self.reorder_deadline = Deadline::Never;
+     }
+ }
+
+@@ -153,6 +212,7 @@ impl<C: AudioDecoder> UdpSession for RtpSession<C> {
+     }
+
+     fn reconcile(&mut self, _peer: Option<&dyn UdpSocketPeer<Self>>) -> RtspResult<()> {
++        self.drain_reorder(Instant::now());
+         self.start_playback_if_ready();
+         Ok(())
+     }
+@@ -220,6 +280,48 @@ mod tests {
+         }
+     }
+
++    #[test]
++    fn recovers_out_of_order_audio_and_releases_missing_packets_at_deadline() {
++        use crate::audio::RingSegment;
++
++        fn packet(sequence: u16, timestamp: u32, sample: u8) -> Vec<u8> {
++            let mut bytes = vec![0x80, 0x60];
++            bytes.extend(sequence.to_be_bytes());
++            bytes.extend(timestamp.to_be_bytes());
++            bytes.extend([0, 0, 0, 0, sample]);
++            bytes
++        }
++
++        let playback = Arc::new(Mutex::new(Playback::default()));
++        let mut session = RtpSession::new_with_cipher(
++            RtpCipher::None,
++            Duration::from_millis(100),
++            Decoder,
++            Box::new(Player(playback.clone())),
++        ).unwrap();
++        session.on_recv(&mut packet(u16::MAX, 0, 1)).unwrap();
++        session.on_recv(&mut packet(1, 2, 3)).unwrap();
++        assert_eq!(session.next_sequence, Some(0));
++        session.on_recv(&mut packet(0, 1, 2)).unwrap();
++        assert_eq!(session.reordered, 1);
++        assert_eq!(session.expired, 0);
++
++        session.on_recv(&mut packet(3, 4, 5)).unwrap();
++        let deadline = session.pending[0].0 + REORDER_WAIT;
++        session.drain_reorder(deadline - Duration::from_millis(1));
++        assert_eq!(session.next_sequence, Some(2));
++        session.drain_reorder(deadline);
++        assert_eq!(session.expired, 1);
++        session.on_recv(&mut packet(2, 3, 4)).unwrap();
++        assert_eq!(session.next_sequence, Some(4));
++        let playback = playback.lock().unwrap();
++        let ring = playback.ring.as_ref().unwrap();
++        assert_eq!(
++            ring.iter_segments(5, false).collect::<Vec<_>>(),
++            [RingSegment::Data(&[1, 2, 3]), RingSegment::Gap(1), RingSegment::Data(&[5])],
++        );
++    }
++
+     #[tokio::test]
+     async fn latency_wakes_player_without_another_datagram() {
+         let playback = Arc::new(Mutex::new(Playback::default()));

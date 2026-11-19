@@ -1,0 +1,15 @@
+[Unit]
+Description=CarFluxoid projected dashboard
+After=carfluxoid-aa.service
+
+[Service]
+Type=simple
+RuntimeDirectory=carfluxoid-ui
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/python3 /opt/carfluxoid/bin/dashboard.py
+Restart=on-failure
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

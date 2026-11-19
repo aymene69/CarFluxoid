@@ -24,11 +24,17 @@ int main(void){
  play(1);audio_pump(t+100000,start);
  assert(out_n==1&&audio_discarded==2); /* request pending: no repeat */
  /* GAIN -> START session 1, configuration 0, then timestamped PCM. */
- audio_on_focus(1);play(1);audio_pump(t+200000,start);
+ audio_preroll_us=60000;audio_on_focus(1);play(1);audio_pump(t+140000,start);
+ assert(out_n==1&&!audio_streaming);
+ audio_pump(t+199999,start);assert(out_n==1);
+ audio_pump(t+200000,start);audio_preroll_us=0;
  assert(out_n==3&&out_ch[1]==4&&out_id[1]==0x8001&&out_len[1]==4&&!memcmp(out_body[1],"\x08\x01\x10\x00",4));
  assert(out_ch[2]==4&&out_id[2]==0&&out_len[2]==sizeof pcm+8&&audio_streaming&&audio_sent==1&&audio_peak==10000);
  /* The announced window lets blocks flow ahead of acknowledgements. */
  play(5);audio_pump(t+300000,start);assert(audio_sent==6&&audio_unacked==6);
+ uint64_t stamp=0;
+ for(int i=0;i<8;i++)stamp=(stamp<<8)|out_body[3][i];
+ assert(stamp==t+300000); /* a delayed burst starts at current session time */
  unsigned char ack[]={0x08,0x01,0x10,0x01};audio_on_ack(ack,sizeof ack);assert(audio_unacked==5&&audio_acks==1);
  /* Quiet iPhone: STOP after 2 s, focus kept for a quick restart. */
  audio_pump(t+300000+AUDIO_STOP_IDLE_US+1,start);

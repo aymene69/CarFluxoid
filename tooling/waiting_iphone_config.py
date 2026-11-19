@@ -82,8 +82,13 @@ def rewrite_idr(nal, src_sps, src_pps, dst_sps, dst_pps, idr_id):
     pps_id = r.ue(); r.u(src_sps['log2_frame_num']); r.ue()
     no_output, long_term = r.u(1), r.u(1)
     qp = src_pps['init_qp'] + r.se()
-    deblock = (r.ue(), r.se(), r.se()) if src_pps['deblock'] else (0, 0, 0)
-    if deblock[0] == 1: deblock = (1,)
+    deblock_mode = r.ue() if src_pps['deblock'] else 0
+    if deblock_mode == 1:
+        deblock = (1,)
+    elif src_pps['deblock']:
+        deblock = (deblock_mode, r.se(), r.se())
+    else:
+        deblock = (0, 0, 0)
     while r.i & 7: assert r.u(1) == 1, 'cabac_alignment_one_bit'
     w.ue(first_mb); w.ue(slice_type); w.ue(pps_id); w.u(dst_sps['log2_frame_num'], 0); w.ue(idr_id)
     w.u(1, no_output); w.u(1, long_term); w.se(qp - dst_pps['init_qp'])

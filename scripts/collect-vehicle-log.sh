@@ -7,7 +7,7 @@ out=${2:-carfluxoid-vehicle-$(date +%Y%m%d-%H%M%S).log}
 umask 077
 ssh -o ConnectTimeout=8 "root@$host" 'sh -s' > "$out.part" <<'REMOTE'
 set -eu
-dir=/persist/aa-diagnostics
+dir=/tmp/aa-diagnostics
 mkdir -p "$dir"
 umask 077
 report="$dir/rapport-complet.log"
@@ -25,14 +25,13 @@ report="$dir/rapport-complet.log"
  done
  echo '=== RESOURCES ===';cat /proc/meminfo;df -k /tmp /persist;cat /proc/modules
  echo '=== CLOCK ===';cat /tmp/aa-clock-status /persist/aa-clock-epoch 2>/dev/null || true
- for p in /var/log/aa-bridge-boot.log /tmp/aa-autoboot/phone.log /tmp/aa-autoboot/carplay.log /var/log/bluetooth.log /persist/aa-diagnostics/current.log /persist/aa-diagnostics/previous.log;do
+ for p in /tmp/aa-autoboot/boot.log /tmp/aa-autoboot/session.log /var/log/aa-bridge-boot.log /tmp/aa-autoboot/phone.log /tmp/aa-autoboot/carplay.log /var/log/bluetooth.log /persist/aa-diagnostics/current.log /persist/aa-diagnostics/previous.log;do
   echo "=== $p (last 65536 bytes) ==="
   if [ -f "$p" ];then tail -c 65536 "$p";else echo MISSING;fi
  done
  echo '=== KERNEL (last 262144 bytes) ===';dmesg | tail -c 262144
 } > "$report.new"
 mv -f "$report.new" "$report"
-sync
 cat "$report"
 REMOTE
 mv -f "$out.part" "$out"

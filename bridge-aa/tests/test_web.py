@@ -1,8 +1,35 @@
-import subprocess,tempfile,os,time,http.client,json,shlex
+import subprocess,tempfile,os,time,http.client,json,shlex,plistlib,struct,zlib
 folder=tempfile.mkdtemp(prefix='aa-web-test-')
 p=subprocess.Popen(shlex.split(os.environ.get('AA_WEB_TEST_COMMAND','/build/aa/web-server-test')),env={**os.environ,'AA_SETTINGS_DIR':folder},stderr=subprocess.DEVNULL)
 def req(method,path,body=None,headers={}):
  c=http.client.HTTPConnection('127.0.0.1',80,timeout=3);c.request(method,path,body,headers);r=c.getresponse();data=r.read();status=r.status;c.close();return status,data
+
+def test_oem_info(command):
+ def read_info():
+  result=subprocess.run(shlex.split(command),env={**os.environ,'AA_SETTINGS_DIR':folder},
+                        capture_output=True,check=True)
+  return plistlib.loads(result.stdout),result.stderr
+ def chunk(kind,data):
+  return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
+ header=struct.pack('>IIBBBBB',256,256,8,2,0,0,0)
+ pixels=(b'\0'+bytes([222,33,61])*256)*256
+ uploaded=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',header)+chunk(b'IDAT',zlib.compress(pixels))+chunk(b'IEND',b'')
+ previous, _ = read_info()
+ assert req('PUT','/logo.png',uploaded)[0]==200
+ assert req('GET','/logo.png')==(200,uploaded)
+ current, journal=read_info()
+ assert b'source=custom' in journal
+ assert current['oemIconLabel']=='Peugeot'
+ assert current['oemIconVisible'] is True
+ assert 'oemIcon' not in current
+ assert current['firmwareRevision']!=previous['firmwareRevision']
+ assert [(i['widthPixels'],i['heightPixels']) for i in current['oemIcons']]==[(120,120),(180,180),(256,256)]
+ for icon, old in zip(current['oemIcons'],previous['oemIcons'],strict=True):
+  assert icon['prerendered'] is True
+  assert isinstance(icon['imageData'],bytes) and icon['imageData'].startswith(b'\x89PNG\r\n\x1a\n')
+  assert icon['imageData']!=old['imageData']
+ print('Web upload reaches CarPlay binary /info with all three custom PNGs')
+
 try:
  for _ in range(30):
   try:assert req('GET','/name')==(200,b'Car');break
@@ -41,6 +68,11 @@ try:
   except OSError:time.sleep(.05)
  else:raise AssertionError('restarted server not ready')
  assert req('GET','/logo.png')==(200,logo)
+ assert req('PUT','/options','sidebar=bottom')[0]==200
+ if os.environ.get('AA_OEM_INFO_TEST_COMMAND'):
+  test_oem_info(os.environ['AA_OEM_INFO_TEST_COMMAND'])
+ assert json.loads(req('GET','/options')[1])['sidebar']=='bottom'
+ assert b'value="bottom"' in req('GET','/')[1]
  assert req('PUT','/options','fps=10\nassist_buttons=false')[0]==200
  assert json.loads(req('GET','/options')[1])['fps']==10
  assert req('POST','/reset')[0]==200

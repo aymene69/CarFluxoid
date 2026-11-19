@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">CarFluxoid</h1>
-<p align="center"><strong>Wireless CarPlay → wired Android Auto</strong><br>A bridge for compatible Allwinner V821 USB dongles.</p>
+<p align="center"><strong>Wireless CarPlay → wired Android Auto</strong><br>For compatible Allwinner V821 dongles and the Raspberry Pi Zero 2 W.</p>
 
 <p align="center">
   <a href="https://github.com/aymene69/CarFluxoid/actions/workflows/checks.yml"><img src="https://github.com/aymene69/CarFluxoid/actions/workflows/checks.yml/badge.svg" alt="Source and image-tool checks"></a>
@@ -11,11 +11,11 @@
   <img src="https://img.shields.io/badge/status-development%20preview-orange" alt="Development preview">
 </p>
 
-CarFluxoid receives wireless CarPlay from an iPhone and forwards its video, audio and controls through a wired Android Auto connection. The receiver and bridge run on the dongle; a computer is used for building, installation and development testing.
+CarFluxoid receives wireless CarPlay from an iPhone and forwards its video, audio and controls through a wired Android Auto connection. The receiver and bridge run on the selected device. A computer is used for building, installation and development testing.
 
 ```mermaid
 flowchart LR
-    I[iPhone · wireless CarPlay] --> D[CarFluxoid dongle]
+    I[iPhone · wireless CarPlay] --> D[CarFluxoid · V821 or Raspberry Pi]
     D --> H[Head unit · wired Android Auto]
     H -->|Touch and microphone| D
     D -->|Controls and audio input| I
@@ -32,7 +32,17 @@ flowchart LR
 
 ![CarFluxoid waiting screen](assets/waiting/attente-800x480.png)
 
-## Hardware compatibility
+## Raspberry Pi Zero 2 W
+
+The Raspberry Pi target runs on **Raspberry Pi OS Lite 64-bit** and connects to the head unit through the Pi’s USB data port. It uses the same bridge source, an ARM64 build and a USB gadget module built for the installed Pi kernel.
+
+- The projected dashboard starts on a menu with **Démarrer CarPlay**, settings, and a return to the head unit. Both CarPlay actions can bring up the Wi-Fi access point.
+- The connection screen has a **Retour au menu** button. Disconnecting the iPhone during projection returns to the menu.
+- CarPlay projection, music playback and touch have been exercised with Google DHU. The latest logo and Wi-Fi changes still need an end-to-end test on a physical Pi and iPhone. Coverage on real head units varies.
+
+[**Raspberry Pi setup and build**](platforms/raspberrypi/README.md) · [Projected dashboard](platforms/raspberrypi/dashboard/README.md)
+
+## Allwinner V821 hardware compatibility
 
 The current profile targets the following combination:
 
@@ -46,7 +56,7 @@ The current profile targets the following combination:
 
 Retail names do not reliably identify the PCB. X1600, V851 and AIC8800 variants are **not** interchangeable with this profile. Verify the hardware before installation. FEL checks the SoC revision and flash geometry; the radio must be confirmed separately.
 
-## Getting started
+## Getting started on V821
 
 Read the **[installation and recovery guide](docs/INSTALL.md)** before connecting a device for flashing. It covers host dependencies, factory-firmware bootstrap, backups, image composition and restoration.
 

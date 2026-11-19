@@ -73,8 +73,8 @@ stage=session_android_auto
 # One sender owns the video sockets across MTP -> AOA: CarPlay stays connected.
 if [ "$legacy" = 1 ];then export AA_MTP_DISCOVERY=1;else unset AA_MTP_DISCOVERY;fi
 export AA_USB_FAST_READ=1 AA_AUTONOMOUS=1 AA_WAIT_SCREEN_DIR="$base"
-# Session events reach flash immediately: the head unit may cut VBUS on failure.
-mkdir -p /persist/aa-diagnostics && export AA_SESSION_TRACE=/persist/aa-diagnostics/session.log || true
+# Session events stay in RAM; the collector checkpoints them sparsely.
+export AA_SESSION_TRACE="$base/session.log"
 # Wireless reception must remain available even if the head unit never starts AA.
 if [ "${AA_RADIO_EXTERNAL:-0}" != 1 ];then
  ./catplay-aa-rx "$base/state" "$SSID" "$AA_VIDEO_SOCKET" > "$base/carplay.log" 2>&1 &

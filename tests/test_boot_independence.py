@@ -25,7 +25,7 @@ class BootIndependence(unittest.TestCase):
    script=(ROOT/'deploy/radio-service.sh').read_text().replace('/persist/',str(p)+'/')
    # Isolate daemon startup; this test verifies dependency gating, not BlueZ itself.
    script=script.replace('if ! pidof bluetoothd >/dev/null 2>&1 && [ "$attempts" -lt 3 ];then','if false;then')
-   child=subprocess.Popen(['sh','-c',script],cwd=p,env={**os.environ,'AA_RADIO_WORK':str(p),'AA_DBUS_SOCKET':str(bus)},start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+   child=subprocess.Popen(['sh','-c',script],cwd=p,env={**os.environ,'AA_RADIO_WORK':str(p),'AA_DBUS_SOCKET':str(bus),'AA_RADIO_PERSIST':str(p)},start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
    try:
     time.sleep(.2);self.assertFalse((p/'received').exists())
     with socket.socket(socket.AF_UNIX) as server:
@@ -33,3 +33,20 @@ class BootIndependence(unittest.TestCase):
      while time.monotonic()<end and not (p/'received').exists():time.sleep(.05)
      self.assertTrue((p/'received').exists())
    finally:os.killpg(child.pid,signal.SIGTERM);child.wait()
+
+ def test_radio_recovers_when_missing_identity_is_restored(self):
+  with tempfile.TemporaryDirectory() as td:
+   p=Path(td);bus=p/'bus';(p/'wifi-env.sh').write_text('SSID=test\n')
+   (p/'catplay-aa-rx').write_text('#!/bin/sh\necho started > received\nexec /bin/sleep 30\n');(p/'catplay-aa-rx').chmod(0o700)
+   (p/'bin').mkdir();(p/'bin/sleep').write_text('#!/bin/sh\nif [ "$1" = 10 ];then exec /bin/sleep .05;else exec /bin/sleep "$@";fi\n');(p/'bin/sleep').chmod(0o700)
+   source=(ROOT/'deploy/radio-service.sh').read_text().replace('if ! pidof bluetoothd >/dev/null 2>&1 && [ "$attempts" -lt 3 ];then','if false;then')
+   with socket.socket(socket.AF_UNIX) as server:
+    server.bind(str(bus))
+    child=subprocess.Popen(['sh','-c',source],cwd=p,env={**os.environ,'PATH':str(p/'bin')+':'+os.environ['PATH'],'AA_RADIO_WORK':str(p),'AA_DBUS_SOCKET':str(bus),'AA_RADIO_PERSIST':str(p)},start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    try:
+     time.sleep(.15);self.assertIsNone(child.poll());self.assertFalse((p/'received').exists())
+     (p/'certificate.p7b').write_text('certificate');time.sleep(.1);self.assertFalse((p/'received').exists())
+     (p/'identity.pk8').write_text('key');end=time.monotonic()+3
+     while time.monotonic()<end and not (p/'received').exists():time.sleep(.02)
+     self.assertTrue((p/'received').exists());self.assertEqual((p/'state/certificate.p7b').read_text(),'certificate')
+    finally:os.killpg(child.pid,signal.SIGTERM);child.wait()
