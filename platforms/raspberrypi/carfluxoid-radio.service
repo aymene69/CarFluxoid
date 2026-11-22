@@ -1,0 +1,24 @@
+[Unit]
+Description=CarFluxoid wireless CarPlay receiver (Raspberry Pi)
+Wants=bluetooth.service network-online.target
+After=bluetooth.service network-online.target carfluxoid-aa.service
+ConditionPathExists=/var/lib/carfluxoid/identity/certificate.p7b
+ConditionPathExists=/var/lib/carfluxoid/identity/identity.pk8
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/carfluxoid/identity
+EnvironmentFile=/etc/carfluxoid/radio.env
+Environment=AA_RUNTIME_WORKERS=4
+Environment=AA_SETTINGS_DIR=/var/lib/carfluxoid/settings
+Environment=AA_PAIRING_DIR=/var/lib/carfluxoid/pairing
+Environment=AA_VIDEO_SOCKET=/run/carfluxoid/video.sock
+ExecStartPre=/usr/sbin/rfkill unblock bluetooth
+ExecStart=/opt/carfluxoid/bin/catplay-aa-rx /var/lib/carfluxoid/identity ${AA_WIFI_SSID} /run/carfluxoid/video.sock
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

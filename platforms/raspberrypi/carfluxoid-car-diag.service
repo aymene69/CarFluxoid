@@ -1,0 +1,11 @@
+[Unit]
+Description=CarFluxoid persistent vehicle diagnostic snapshots (Raspberry Pi)
+After=carfluxoid-aa.service carfluxoid-radio.service
+
+[Service]
+Type=simple
+ExecStart=/opt/carfluxoid/bin/car-diag.sh
+Nice=19
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply CatPlay patch
+        run: ./scripts/prepare-catplay.sh
+
+      - name: Shell & Python checks
+        run: |
+          for script in scripts/*.sh platforms/raspberrypi/*.sh; do
+            sh -n "$script"
+          done
+          python3 -m py_compile platforms/raspberrypi/dashboard/dashboard.py tooling/waiting_iphone_config.py scripts/fetch-tls.py scripts/encode-waiting-screens.py
+          python3 -m unittest discover -s tests -v
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libdbus-1-dev libopus-dev
+
+      - name: Build pinned MbedTLS & run C unit tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, tarfile, urllib.request
+          spec = json.loads(Path("tooling/sources.lock.json").read_text())["sources"]["mbedtls"]
+          archive = Path("/tmp/mbedtls.tar.gz")
+          with urllib.request.urlopen(spec["url"], timeout=120) as resp:
+              archive.write_bytes(resp.read())
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == spec["sha256"]
+          dest = Path("/tmp/mbedtls-src")
+          dest.mkdir(exist_ok=True)
+          with tarfile.open(archive) as tar:
+              tar.extractall(dest, filter="data")
+          next(dest.iterdir()).rename("/tmp/mbedtls")
+          PY
+          make -C /tmp/mbedtls -j"$(nproc)" lib
+          cd bridge-aa
+          for t in parser video_config audio_flow microphone car_controls sensors mtp aoa reader_eof; do
+            echo "--- C test: $t ---"
+            cc -O2 -DSYS_io_pgetevents_time64=SYS_io_pgetevents \
+              -Isrc -Ikernel -I/tmp/mbedtls/include "tests/$t.c" \
+              /tmp/mbedtls/library/libmbedtls.a /tmp/mbedtls/library/libmbedx509.a /tmp/mbedtls/library/libmbedcrypto.a \
+              -lpthread -o "/tmp/test_$t"
+            "/tmp/test_$t"
+          done
+
+      - name: Rust unit tests
+        env:
+          OPENSSL_NO_VENDOR: "1"
+        run: cargo test --locked --manifest-path bridge-aa/carplay-rx/Cargo.toml
