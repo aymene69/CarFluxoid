@@ -9,6 +9,10 @@ trap 'rm -rf "$ROOTPATH_TMP"' EXIT
 
 rm -rf "$GENIMAGE_TMP"
 
+# Always refresh boot configs on incremental builds (rpi-firmware only installs them once)
+install -m 644 "$BOARD_DIR/config.txt" "$BINARIES_DIR/rpi-firmware/config.txt"
+install -m 644 "$BOARD_DIR/cmdline.txt" "$BINARIES_DIR/rpi-firmware/cmdline.txt"
+
 genimage \
  --rootpath "$ROOTPATH_TMP" \
  --tmppath "$GENIMAGE_TMP" \

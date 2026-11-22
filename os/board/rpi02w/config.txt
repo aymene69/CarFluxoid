@@ -1,8 +1,6 @@
 # CarFluxoidOS — Raspberry Pi Zero 2 W (ARM64) low-power single-USB profile
 arm_64bit=1
 kernel=Image
-start_file=start.elf
-fixup_file=fixup.dat
 
 # Minimal boot latency
 boot_delay=0
@@ -10,9 +8,9 @@ disable_splash=1
 
 # Power optimization for 500 mA automotive USB data ports:
 # - CarPlay H.264 passthrough needs minimal CPU; 750 MHz cuts peak current by ~120 mA.
-# - Use gpu_mem=32 (gpu_mem=16 requires start_cd.elf, whereas we ship full start.elf).
+# - Use gpu_mem=64 (full start.elf requires >=32 MB; 448 MB remains for CarFluxoid's ~35 MB).
 arm_freq=750
-gpu_mem=32
+gpu_mem=64
 hdmi_blanking=2
 dtparam=audio=off
 camera_auto_detect=0
