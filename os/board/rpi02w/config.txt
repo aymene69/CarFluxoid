@@ -10,12 +10,11 @@ disable_splash=1
 
 # Power optimization for 500 mA automotive USB data ports:
 # - CarPlay H.264 passthrough needs minimal CPU; 750 MHz cuts peak current by ~120 mA.
-# - Disable unused HDMI, onboard audio, camera, and activity LED.
+# - Use gpu_mem=32 (gpu_mem=16 requires start_cd.elf, whereas we ship full start.elf).
 arm_freq=750
-gpu_mem=16
+gpu_mem=32
 hdmi_blanking=2
 dtparam=audio=off
-dtparam=act_led_trigger=none
 camera_auto_detect=0
 display_auto_detect=0
 
