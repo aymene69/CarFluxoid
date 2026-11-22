@@ -19,7 +19,7 @@ start() {
   AA_AUTONOMOUS=1 \
   AA_DIAGNOSTIC=0 \
   /usr/sbin/carfluxoid-supervise start carfluxoid-aa 0.2 -- \
-   /opt/carfluxoid/bin/aa-phone --raw /dev/aa_bulk \
+   nice -n -5 /opt/carfluxoid/bin/aa-phone --raw /dev/aa_bulk \
    /data/tls/test-cert.pem /data/tls/test-key.pem \
    /opt/carfluxoid/assets/mire.h264
 }

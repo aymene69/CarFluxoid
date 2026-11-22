@@ -4,7 +4,7 @@ set -eu
 
 start() {
  /usr/sbin/carfluxoid-supervise start carfluxoid-radio 2 -- \
-  /usr/sbin/carfluxoid-start-radio
+  nice -n -5 /usr/sbin/carfluxoid-start-radio
 }
 
 stop() {
