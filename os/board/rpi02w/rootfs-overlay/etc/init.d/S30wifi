@@ -36,8 +36,8 @@ start() {
  ip link set wlan0 up
  ip addr replace 192.168.50.2/24 dev wlan0
 
- # Low-power automotive single-USB profile: 15 dBm TX (-70% RF power vs 20 dBm stock, zero RTP loss) + power_save off
- iw dev wlan0 set txpower fixed 1500 2>/dev/null || true
+ # Keep adaptive BCM43430 TX power (fixed txpower causes packet loss) + disable power_save for low RTP jitter
+ iw dev wlan0 set txpower auto 2>/dev/null || true
  iw dev wlan0 set power_save off 2>/dev/null || true
 
  dnsmasq -C /etc/dnsmasq.conf

@@ -21,6 +21,6 @@ export AA_RUNTIME_WORKERS=4
 export AA_SETTINGS_DIR=/var/lib/carfluxoid/settings
 export AA_PAIRING_DIR=/var/lib/carfluxoid/pairing
 export AA_VIDEO_SOCKET=/run/carfluxoid/video.sock
-export RUST_LOG=warn
+export RUST_LOG=error
 cd /var/lib/carfluxoid/identity
 exec /opt/carfluxoid/bin/catplay-aa-rx /var/lib/carfluxoid/identity "$ssid" /run/carfluxoid/video.sock

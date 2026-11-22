@@ -1,0 +1,122 @@
+#!/bin/sh
+# CarFluxoidOS atomic A/B OS updater.
+# Writes new SquashFS rootfs into the inactive slot (p2 or p3), verifies SHA256
+# on flash, updates kernel/DTB/config/cmdline on CARFLUXBOOT, and reboots.
+# Persistent /data (p4: certificates, pairings, Bluetooth, Wi-Fi, settings, SSH keys)
+# is NEVER modified or erased.
+#
+# Usage:
+#   ssh root@192.168.50.2 /usr/sbin/carfluxoid-os-update < carfluxoid-os-update.tar
+#   carfluxoid-os-update /path/to/extracted-os-update-dir
+set -eu
+
+[ "$(id -u)" -eq 0 ] || { echo "ERROR: must run as root" >&2; exit 1; }
+[ "$(uname -m)" = aarch64 ] || { echo "ERROR: expected aarch64" >&2; exit 1; }
+
+if [ ! -b /dev/mmcblk0p4 ]; then
+ echo "ERROR: A/B partition layout not detected (/dev/mmcblk0p4 missing)." >&2
+ echo "Flash the CarFluxoidOS A/B image once with Raspberry Pi Imager; all future updates are A/B over SSH." >&2
+ exit 1
+fi
+
+# Detect active root slot from /proc/cmdline
+active_root=$(sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline)
+case "$active_root" in
+ /dev/mmcblk0p2)
+  target_slot=B
+  target_dev=/dev/mmcblk0p3
+  ;;
+ /dev/mmcblk0p3)
+  target_slot=A
+  target_dev=/dev/mmcblk0p2
+  ;;
+ *)
+  echo "ERROR: unsupported active root device '$active_root'" >&2
+  exit 1
+  ;;
+esac
+
+STAGE=/data/.os-update-stage
+cleanup() {
+ umount /mnt/boot 2>/dev/null || true
+ rm -rf "$STAGE"
+}
+trap cleanup EXIT
+
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+
+if [ $# -ge 1 ] && [ -d "$1" ]; then
+ src=$1
+else
+ echo "Receiving CarFluxoidOS A/B update archive..."
+ tar -xf - -C "$STAGE"
+ src=$STAGE
+fi
+
+cd "$src"
+[ -s SHA256SUMS ] || { echo "ERROR: SHA256SUMS missing from update archive" >&2; exit 1; }
+[ -s rootfs.squashfs ] || { echo "ERROR: rootfs.squashfs missing from update archive" >&2; exit 1; }
+[ -s Image ] || { echo "ERROR: Image missing from update archive" >&2; exit 1; }
+[ -s bcm2710-rpi-zero-2-w.dtb ] || { echo "ERROR: bcm2710-rpi-zero-2-w.dtb missing from update archive" >&2; exit 1; }
+
+echo "Verifying archive integrity (SHA256)..."
+sha256sum -c SHA256SUMS
+
+rootfs_bytes=$(wc -c < rootfs.squashfs)
+part_sectors=$(cat "/sys/class/block/${target_dev#/dev/}/size")
+part_bytes=$((part_sectors * 512))
+if [ "$rootfs_bytes" -gt "$part_bytes" ]; then
+ echo "ERROR: rootfs.squashfs ($rootfs_bytes B) exceeds $target_dev ($part_bytes B)" >&2
+ exit 1
+fi
+
+echo "Active root: $active_root -> flashing Slot $target_slot ($target_dev, $((rootfs_bytes / 1048576)) MiB)..."
+dd if=rootfs.squashfs of="$target_dev" bs=1M conv=fsync status=none
+
+echo "Verifying flashed Slot $target_slot on microSD..."
+expected_sha=$(sha256sum rootfs.squashfs | awk '{print $1}')
+actual_sha=$(head -c "$rootfs_bytes" "$target_dev" | sha256sum | awk '{print $1}')
+if [ "$expected_sha" != "$actual_sha" ]; then
+ echo "ERROR: flash verification mismatch on $target_dev (expected $expected_sha, got $actual_sha)" >&2
+ echo "Bootloader was NOT switched; current slot $active_root remains untouched." >&2
+ exit 1
+fi
+
+echo "Updating boot partition (/dev/mmcblk0p1)..."
+mkdir -p /mnt/boot
+mount -t vfat /dev/mmcblk0p1 /mnt/boot
+
+for f in Image bcm2710-rpi-zero-2-w.dtb config.txt; do
+ if [ -s "$f" ]; then
+  cp "$f" "/mnt/boot/$f.new"
+  mv -f "/mnt/boot/$f.new" "/mnt/boot/$f"
+ fi
+done
+
+if [ -d overlays ]; then
+ mkdir -p /mnt/boot/overlays
+ cp -a overlays/. /mnt/boot/overlays/
+fi
+
+# Atomically switch cmdline.txt to the newly verified inactive slot
+if [ -s cmdline.txt ]; then
+ base_cmdline=$(cat cmdline.txt)
+else
+ base_cmdline=$(cat /mnt/boot/cmdline.txt)
+fi
+printf '%s\n' "$base_cmdline" | sed "s|root=/dev/mmcblk0p[23]|root=$target_dev|" > /mnt/boot/cmdline.txt.new
+grep -q "root=$target_dev" /mnt/boot/cmdline.txt.new || { echo "ERROR: failed to update cmdline.txt" >&2; exit 1; }
+mv -f /mnt/boot/cmdline.txt.new /mnt/boot/cmdline.txt
+
+# Clear previous app-only OverlayFS binaries so the new OS slot's /usr/share/carfluxoid takes effect.
+# User data (/data/identity, /data/pairing, /data/bluetooth, /data/settings, /data/radio.env, /data/dropbear, /data/tls) is NEVER touched.
+rm -rf /data/overlay/opt/upper/* /data/overlay/opt/work/* 2>/dev/null || true
+
+sync
+umount /mnt/boot
+rm -rf "$STAGE"
+
+echo "CarFluxoidOS Slot $target_slot ($target_dev) verified and armed. /data preserved."
+echo "Rebooting in 1 second..."
+(sleep 1; reboot) >/dev/null 2>&1 &

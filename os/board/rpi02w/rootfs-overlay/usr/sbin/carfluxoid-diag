@@ -48,7 +48,6 @@ snapshot() {
   fi
  } > "$TMP" 2>&1
  mv -f "$TMP" "$LOG"
- sync
 }
 
 for delay in 20 40 60 120; do
