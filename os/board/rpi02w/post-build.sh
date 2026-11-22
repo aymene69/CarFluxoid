@@ -66,4 +66,12 @@ for bin in "$BASE/bin/aa-phone" "$BASE/bin/catplay-aa-rx"; do
   fi
  done
 done
-echo "CarFluxoidOS post-build verified: all shared libraries present."
+# Verify kmod/libkmod supports .ko.xz when kernel modules are XZ-compressed
+if find "$TARGET_DIR/lib/modules" -name '*.ko.xz' | grep -q .; then
+ if ! readelf -d "$TARGET_DIR/usr/bin/kmod" "$TARGET_DIR"/usr/lib/libkmod.so* 2>/dev/null | grep -q 'liblzma\.so'; then
+  echo "ERROR: kernel modules are .ko.xz but target kmod was built without liblzma (enable BR2_PACKAGE_XZ=y)" >&2
+  exit 1
+ fi
+fi
+
+echo "CarFluxoidOS post-build verified: all shared libraries and kmod XZ support present."
