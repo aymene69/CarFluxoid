@@ -6,6 +6,7 @@ start() {
  modprobe dwc2 2>/dev/null || true
  modprobe libcomposite 2>/dev/null || true
  modprobe aa_bulk aoa_protocol=2 2>/dev/null || true
+ udevadm settle --timeout=3 2>/dev/null || true
 
  env \
   AA_VIDEO_SOCKET=/run/carfluxoid/video.sock \

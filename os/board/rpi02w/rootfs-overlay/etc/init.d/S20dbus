@@ -5,13 +5,14 @@ set -eu
 case "${1:-start}" in
  start)
   mkdir -p /run/dbus /tmp/dbus
+  chown dbus:dbus /run/dbus /tmp/dbus 2>/dev/null || true
   dbus-uuidgen --ensure=/tmp/dbus/machine-id 2>/dev/null || true
-  rm -f /run/dbus/pid
+  rm -f /run/messagebus.pid
   dbus-daemon --system --fork
   ;;
  stop)
-  [ -r /run/dbus/pid ] && kill "$(cat /run/dbus/pid)" 2>/dev/null || true
-  rm -f /run/dbus/pid
+  [ -r /run/messagebus.pid ] && kill "$(cat /run/messagebus.pid)" 2>/dev/null || true
+  rm -f /run/messagebus.pid
   ;;
  restart)
   "$0" stop
