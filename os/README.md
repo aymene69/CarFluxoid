@@ -47,7 +47,7 @@ make os         # compiles CarFluxoidOS -> local/os/carfluxoid-os.img.xz + SHA25
    - `certificate.p7b`
    - `identity.pk8`
    - *(optional)* `wifi-pass.txt` (8–63 chars) to set your own `CarFluxoid-Pi_AP` Wi-Fi passphrase (otherwise a random 24-hex passphrase is generated in `/data/radio.env`)
-   - *(optional)* `authorized_keys` for passwordless SSH (`root@192.168.50.2`, default password `carfluxoid`)
+   - *(optional)* `authorized_keys` for passwordless SSH (`root@192.168.50.2`, default password `c@rfluxoid`, same for `CarFluxoid-Pi_AP` Wi-Fi)
 3. Eject the SD card, insert it into the Raspberry Pi Zero 2 W, and plug a short micro-USB **data** cable from your car’s Android Auto USB port into the Pi’s **USB** port (closest to mini-HDMI).
 4. Pair your iPhone with Bluetooth **CarFluxoid** and accept CarPlay.
 5. Configure settings, view live diagnostics/logs, or upload OTA bundles at `http://192.168.50.2` while joined to Wi-Fi **`CarFluxoid-Pi_AP`**.

@@ -18,7 +18,7 @@ start() {
   candidate=$(tr -d '\r\n' < /var/lib/carfluxoid/settings/wifi-name.txt)
   [ -n "$candidate" ] && ssid=$candidate
  fi
- pass=carfluxoid1234
+ pass=c@rfluxoid
  if [ -r /data/radio.env ]; then
   p=$(sed -n 's/^AA_WIFI_PASSWORD=//p' /data/radio.env)
   [ "${#p}" -ge 8 ] && pass=$p

@@ -62,7 +62,7 @@ case "${1:-start}" in
   # Default first-boot WPA2 passphrase (overridable via wifi-pass.txt on CARFLUXBOOT or /data/radio.env)
   if [ ! -s /data/radio.env ]; then
    umask 077
-   printf 'AA_WIFI_SSID=CarFluxoid-Pi_AP\nAA_WIFI_PASSWORD=carfluxoid1234\n' > /data/radio.env
+   printf 'AA_WIFI_SSID=CarFluxoid-Pi_AP\nAA_WIFI_PASSWORD=c@rfluxoid\n' > /data/radio.env
    sync
   fi
   ;;
