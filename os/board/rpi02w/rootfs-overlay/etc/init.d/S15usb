@@ -1,0 +1,34 @@
+#!/bin/sh
+# Load DWC2 peripheral + aa_bulk USB AOA gadget and launch aa-phone immediately.
+set -eu
+
+start() {
+ modprobe dwc2 2>/dev/null || true
+ modprobe libcomposite 2>/dev/null || true
+ modprobe aa_bulk aoa_protocol=2 2>/dev/null || true
+
+ env \
+  AA_VIDEO_SOCKET=/run/carfluxoid/video.sock \
+  AA_SETTINGS_FILE=/var/lib/carfluxoid/settings/options.txt \
+  AA_WAIT_SCREEN_DIR=/opt/carfluxoid/assets \
+  AA_DASHBOARD_DIR=/run/carfluxoid-ui \
+  AA_SESSION_TRACE=/run/carfluxoid/session.log \
+  AA_AUDIO_PREROLL=450 \
+  AA_USB_FAST_READ=1 \
+  AA_AUTONOMOUS=1 \
+  AA_DIAGNOSTIC=0 \
+  /usr/sbin/carfluxoid-supervise start carfluxoid-aa 0.2 -- \
+   /opt/carfluxoid/bin/aa-phone --raw /dev/aa_bulk \
+   /data/tls/test-cert.pem /data/tls/test-key.pem \
+   /opt/carfluxoid/assets/mire.h264
+}
+
+stop() {
+ /usr/sbin/carfluxoid-supervise stop carfluxoid-aa
+}
+
+case "${1:-start}" in
+ start) start ;;
+ stop) stop ;;
+ restart) stop; start ;;
+esac

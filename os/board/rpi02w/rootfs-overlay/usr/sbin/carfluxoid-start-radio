@@ -1,0 +1,26 @@
+#!/bin/sh
+# Launch catplay-aa-rx with CarFluxoidOS paths and AP credentials.
+set -eu
+[ -s /var/lib/carfluxoid/identity/certificate.p7b ] || { echo "Waiting for MFi certificate.p7b in /var/lib/carfluxoid/identity" >&2; sleep 5; exit 1; }
+[ -s /var/lib/carfluxoid/identity/identity.pk8 ] || { echo "Waiting for MFi identity.pk8 in /var/lib/carfluxoid/identity" >&2; sleep 5; exit 1; }
+
+if [ -r /data/radio.env ]; then
+ # shellcheck disable=SC1091
+ set -a
+ . /data/radio.env
+ set +a
+fi
+
+ssid=${AA_WIFI_SSID:-CarFluxoid-Pi_AP}
+if [ -s /var/lib/carfluxoid/settings/wifi-name.txt ]; then
+ candidate=$(tr -d '\r\n' < /var/lib/carfluxoid/settings/wifi-name.txt)
+ [ -n "$candidate" ] && ssid=$candidate
+fi
+export AA_WIFI_SSID="$ssid"
+export AA_RUNTIME_WORKERS=4
+export AA_SETTINGS_DIR=/var/lib/carfluxoid/settings
+export AA_PAIRING_DIR=/var/lib/carfluxoid/pairing
+export AA_VIDEO_SOCKET=/run/carfluxoid/video.sock
+export RUST_LOG=warn
+cd /var/lib/carfluxoid/identity
+exec /opt/carfluxoid/bin/catplay-aa-rx /var/lib/carfluxoid/identity "$ssid" /run/carfluxoid/video.sock

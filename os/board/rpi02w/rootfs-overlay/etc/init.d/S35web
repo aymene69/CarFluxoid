@@ -1,0 +1,21 @@
+#!/bin/sh
+# Launch CarFluxoid web settings, diagnostic, log viewer, and OTA server on port 80.
+set -eu
+
+start() {
+ env \
+  AA_SETTINGS_DIR=/var/lib/carfluxoid/settings \
+  AA_VIDEO_SOCKET=/run/carfluxoid/video.sock \
+  /usr/sbin/carfluxoid-supervise start carfluxoid-web 1 -- \
+   /opt/carfluxoid/bin/catplay-aa-rx --web
+}
+
+stop() {
+ /usr/sbin/carfluxoid-supervise stop carfluxoid-web
+}
+
+case "${1:-start}" in
+ start) start ;;
+ stop) stop ;;
+ restart) stop; start ;;
+esac

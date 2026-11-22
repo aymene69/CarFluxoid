@@ -1,0 +1,21 @@
+#!/bin/sh
+# Launch projected Android Auto touchscreen dashboard (Python + Pillow + minimal FFmpeg).
+set -eu
+
+start() {
+ mkdir -p /run/carfluxoid-ui
+ env \
+  PYTHONDONTWRITEBYTECODE=1 \
+  /usr/sbin/carfluxoid-supervise start carfluxoid-dashboard 1 -- \
+   /usr/bin/python3 /opt/carfluxoid/bin/dashboard.py
+}
+
+stop() {
+ /usr/sbin/carfluxoid-supervise stop carfluxoid-dashboard
+}
+
+case "${1:-start}" in
+ start) start ;;
+ stop) stop ;;
+ restart) stop; start ;;
+esac

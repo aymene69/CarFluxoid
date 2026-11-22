@@ -1,0 +1,56 @@
+#!/bin/sh
+# Bring up low-power 10 dBm CarFluxoid Wi-Fi AP (192.168.50.2/24 + IPv6 link-local) via hostapd + dnsmasq.
+set -eu
+
+start() {
+ modprobe brcmfmac 2>/dev/null || true
+ rfkill unblock wifi 2>/dev/null || true
+
+ i=0
+ while [ "$i" -lt 40 ] && [ ! -d /sys/class/net/wlan0 ]; do
+  sleep 0.1
+  i=$((i + 1))
+ done
+ [ -d /sys/class/net/wlan0 ] || { echo "wlan0 unavailable" >&2; return 1; }
+
+ ssid=CarFluxoid-Pi_AP
+ if [ -s /var/lib/carfluxoid/settings/wifi-name.txt ]; then
+  candidate=$(tr -d '\r\n' < /var/lib/carfluxoid/settings/wifi-name.txt)
+  [ -n "$candidate" ] && ssid=$candidate
+ fi
+ pass=carfluxoid1234
+ if [ -r /data/radio.env ]; then
+  p=$(sed -n 's/^AA_WIFI_PASSWORD=//p' /data/radio.env)
+  [ "${#p}" -ge 8 ] && pass=$p
+ fi
+
+ ip link set lo up 2>/dev/null || true
+ ip addr flush dev wlan0 2>/dev/null || true
+
+ sed -e "s|@SSID@|$ssid|g" -e "s|@PASSPHRASE@|$pass|g" /etc/hostapd.conf.in > /run/hostapd.conf
+ chmod 600 /run/hostapd.conf
+
+ # Start hostapd first so brcmfmac switches to AP mode cleanly before assigning IP & TX power
+ hostapd -B -P /run/hostapd.pid /run/hostapd.conf
+ sleep 0.3
+ ip link set wlan0 up
+ ip addr replace 192.168.50.2/24 dev wlan0
+
+ # Low-power automotive single-USB profile: 10 dBm TX (saves ~100 mA spikes) + power_save off for low RTP jitter
+ iw dev wlan0 set txpower fixed 1000 2>/dev/null || true
+ iw dev wlan0 set power_save off 2>/dev/null || true
+
+ dnsmasq -C /etc/dnsmasq.conf
+}
+
+stop() {
+ [ -r /run/dnsmasq.pid ] && kill "$(cat /run/dnsmasq.pid)" 2>/dev/null || true
+ [ -r /run/hostapd.pid ] && kill "$(cat /run/hostapd.pid)" 2>/dev/null || true
+ rm -f /run/dnsmasq.pid /run/hostapd.pid
+}
+
+case "${1:-start}" in
+ start) start ;;
+ stop) stop ;;
+ restart) stop; sleep 0.2; start ;;
+esac

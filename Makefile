@@ -1,5 +1,6 @@
-IMAGE ?= carfluxoid-pi-build:20261122
-HOST  ?= aymene@192.168.50.2
+IMAGE    ?= carfluxoid-pi-build:20261122
+OS_IMAGE ?= carfluxoid-os-build:20261122
+HOST     ?= aymene@192.168.50.2
 DOCKER_RUN = docker run --rm --platform linux/arm64 \
 	-v "$(CURDIR):/input" \
 	-v carfluxoid-pi-build:/build \
@@ -9,7 +10,7 @@ DOCKER_RUN = docker run --rm --platform linux/arm64 \
 	-e OPENSSL_NO_VENDOR=1 \
 	$(IMAGE)
 
-.PHONY: help prepare image build test tls deploy logs
+.PHONY: help prepare image build test tls os-image os deploy logs
 
 help:
 	@echo "CarFluxoid — Raspberry Pi Zero 2 W Wireless CarPlay-to-Android-Auto Bridge"
@@ -20,6 +21,8 @@ help:
 	@echo "  make build                 Build ARM64 binaries, update-bundle/ and carfluxoid-update.tar.gz"
 	@echo "  make test                  Run Rust, C, web, MTP, and dashboard test suites"
 	@echo "  make tls                   Download & verify reference Android Auto TLS certificate/key"
+	@echo "  make os-image              Build the CarFluxoidOS Buildroot Docker image"
+	@echo "  make os                    Build the CarFluxoidOS SD card image (local/os/carfluxoid-os.img.xz)"
 	@echo "  make deploy HOST=user@ip   Deploy update-bundle to a Raspberry Pi over SSH"
 	@echo "  make logs   HOST=user@ip   Fetch the latest vehicle diagnostic log to local/raspberrypi/"
 
@@ -37,6 +40,15 @@ test:
 
 tls:
 	python3 scripts/fetch-tls.py
+
+os-image:
+	docker build --platform linux/arm64 -t $(OS_IMAGE) -f os/Dockerfile os/
+
+os:
+	docker run --rm --platform linux/arm64 \
+		-v "$(CURDIR):/input" \
+		-v carfluxoid-br:/br \
+		$(OS_IMAGE) sh /input/os/build.sh
 
 deploy:
 	scp -r local/raspberrypi/update-bundle $(HOST):/tmp/carfluxoid-update

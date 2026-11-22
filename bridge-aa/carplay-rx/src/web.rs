@@ -109,9 +109,17 @@ fn read_tail(path:impl AsRef<Path>,max_bytes:usize)->Option<String>{
  Some(String::from_utf8_lossy(slice).into_owned())
 }
 fn service_state(name:&str)->String{
- Command::new("systemctl").args(["is-active",name]).output().ok()
+ if let Some(state)=Command::new("systemctl").args(["is-active",name]).output().ok()
   .map(|o|String::from_utf8_lossy(&o.stdout).trim().to_string())
-  .filter(|s|!s.is_empty()).unwrap_or_else(||"unknown".into())
+  .filter(|s|!s.is_empty()) {
+  return state;
+ }
+ if let Some(pid)=read_trimmed(format!("/run/carfluxoid-svc/{name}.pid"))
+  .and_then(|s|s.parse::<u32>().ok()) {
+  if Path::new(&format!("/proc/{pid}")).exists() { return "active".into(); }
+  return "inactive".into();
+ }
+ "unknown".into()
 }
 fn diag_json()->String{
  let temp_c=read_trimmed("/sys/class/thermal/thermal_zone0/temp")

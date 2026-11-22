@@ -1,0 +1,6 @@
+config BR2_PACKAGE_AA_BULK
+	bool "aa_bulk kernel module"
+	depends on BR2_LINUX_KERNEL
+	help
+	  CarFluxoid USB High-Speed Android Auto AOA bulk gadget driver
+	  with prequeued RX FIFO (aa_bulk.ko).

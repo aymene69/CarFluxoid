@@ -1,0 +1,20 @@
+#!/bin/sh
+# CarFluxoidOS Wi-Fi AP & CarPlay radio helper called by dashboard.py.
+set -eu
+case "${1:-}" in
+ '') action=ensure ;;
+ --restart) action=restart ;;
+ *) echo "Usage: $0 [--restart]" >&2; exit 2 ;;
+esac
+
+# Reload hostapd if SSID changed or hostapd isn't running
+if [ ! -r /run/hostapd.pid ] || ! kill -0 "$(cat /run/hostapd.pid 2>/dev/null)" 2>/dev/null; then
+ /etc/init.d/S30wifi restart
+elif [ "$action" = restart ]; then
+ /etc/init.d/S30wifi restart
+fi
+
+if [ "$action" = restart ] || [ ! -r /run/carfluxoid-svc/carfluxoid-radio.pid ]; then
+ /etc/init.d/S45radio restart
+fi
+echo 'Point d’accès CarFluxoid actif sans minuterie.'

@@ -1,0 +1,27 @@
+# CarFluxoidOS — Raspberry Pi Zero 2 W (ARM64) low-power single-USB profile
+arm_64bit=1
+kernel=Image
+start_file=start.elf
+fixup_file=fixup.dat
+
+# Minimal boot latency
+boot_delay=0
+disable_splash=1
+
+# Power optimization for 500 mA automotive USB data ports:
+# - CarPlay H.264 passthrough needs minimal CPU; 750 MHz cuts peak current by ~120 mA.
+# - Disable unused HDMI, onboard audio, camera, and activity LED.
+arm_freq=750
+gpu_mem=16
+hdmi_blanking=2
+dtparam=audio=off
+dtparam=act_led_trigger=none
+camera_auto_detect=0
+display_auto_detect=0
+
+# Keep PL011 UART0 exclusively for BCM43430 Bluetooth (no miniuart-bt)
+enable_uart=0
+
+# USB OTG peripheral mode for Android Auto gadget (aa_bulk.ko)
+[all]
+dtoverlay=dwc2,dr_mode=peripheral

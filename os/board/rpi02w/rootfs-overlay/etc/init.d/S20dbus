@@ -1,0 +1,20 @@
+#!/bin/sh
+# Start system D-Bus daemon (required by BlueZ and catplay-aa-rx).
+set -eu
+
+case "${1:-start}" in
+ start)
+  mkdir -p /run/dbus /tmp/dbus
+  dbus-uuidgen --ensure=/tmp/dbus/machine-id 2>/dev/null || true
+  rm -f /run/dbus/pid
+  dbus-daemon --system --fork
+  ;;
+ stop)
+  [ -r /run/dbus/pid ] && kill "$(cat /run/dbus/pid)" 2>/dev/null || true
+  rm -f /run/dbus/pid
+  ;;
+ restart)
+  "$0" stop
+  "$0" start
+  ;;
+esac

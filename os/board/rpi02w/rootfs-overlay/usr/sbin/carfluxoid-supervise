@@ -1,0 +1,69 @@
+#!/bin/sh
+# Minimal crash-recovery supervisor for CarFluxoidOS services.
+# Usage: carfluxoid-supervise start|stop|restart <name> [delay_s] [-- cmd args...]
+set -eu
+
+SVC_DIR=/run/carfluxoid-svc
+LOG_DIR=/var/log
+mkdir -p "$SVC_DIR" "$LOG_DIR"
+
+action=${1:-}
+name=${2:-}
+[ -n "$action" ] && [ -n "$name" ] || { echo "Usage: $0 start|stop|restart <name> [delay] -- cmd..." >&2; exit 2; }
+shift 2
+
+sup_pid="$SVC_DIR/$name.sup.pid"
+child_pid="$SVC_DIR/$name.pid"
+log_file="$LOG_DIR/$name.log"
+
+stop_svc() {
+ if [ -r "$sup_pid" ]; then
+  pid=$(cat "$sup_pid" 2>/dev/null || true)
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  rm -f "$sup_pid"
+ fi
+ if [ -r "$child_pid" ]; then
+  pid=$(cat "$child_pid" 2>/dev/null || true)
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  sleep 0.2
+  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+  rm -f "$child_pid"
+ fi
+}
+
+case "$action" in
+ stop)
+  stop_svc
+  exit 0
+  ;;
+ start|restart)
+  delay=0.2
+  if [ "${1:-}" != "--" ]; then
+   delay=$1
+   shift
+  fi
+  [ "${1:-}" = "--" ] && shift
+  [ $# -gt 0 ] || { echo "Missing command for $name" >&2; exit 2; }
+  stop_svc
+  (
+   trap 'if [ -r "'"$child_pid"'" ]; then kill "$(cat "'"$child_pid"'")" 2>/dev/null || true; fi; rm -f "'"$child_pid"'" "'"$sup_pid"'"; exit 0' TERM INT
+   while :; do
+    # Cap per-service tmpfs log around 512 KiB
+    if [ -f "$log_file" ] && [ "$(wc -c < "$log_file" 2>/dev/null || echo 0)" -gt 524288 ]; then
+     tail -c 262144 "$log_file" > "$log_file.tmp" && mv -f "$log_file.tmp" "$log_file"
+    fi
+    "$@" >> "$log_file" 2>&1 &
+    pid=$!
+    echo "$pid" > "$child_pid"
+    wait "$pid" || true
+    rm -f "$child_pid"
+    sleep "$delay"
+   done
+  ) >/dev/null 2>&1 &
+  echo "$!" > "$sup_pid"
+  ;;
+ *)
+  echo "Unknown action: $action" >&2
+  exit 2
+  ;;
+esac

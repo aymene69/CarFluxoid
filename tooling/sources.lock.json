@@ -6,6 +6,12 @@
       "url": "https://codeload.github.com/Mbed-TLS/mbedtls/tar.gz/2fc8413bfcb51354c8e679141b17b3f1a5942561",
       "file": "mbedtls.tar.gz",
       "sha256": "ffa596d4837f8668c5bc07f36c8bfdb5f4ace3a2cdc4e0f096ad27a9e3d58684"
+    },
+    "buildroot": {
+      "version": "2025.02.20",
+      "url": "https://buildroot.org/downloads/buildroot-2025.02.20.tar.xz",
+      "file": "buildroot-2025.02.20.tar.xz",
+      "sha256": "fa79fa606387b3d485a6cfd30eb2302b2cc30775ffb668f2a1269ff4c9674b6b"
     }
   }
 }

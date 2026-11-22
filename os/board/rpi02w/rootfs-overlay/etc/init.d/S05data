@@ -1,0 +1,75 @@
+#!/bin/sh
+# Mount persistent /data partition, set up writable OverlayFS for /opt/carfluxoid,
+# and import any user-supplied credentials placed on the FAT32 boot partition.
+set -eu
+
+case "${1:-start}" in
+ start)
+  mkdir -p /data /mnt/boot /run/carfluxoid /run/carfluxoid-ui /run/carfluxoid-svc /run/dbus
+  chmod 700 /run/carfluxoid
+
+  # Auto-repair ext4 journal after abrupt vehicle ignition power-off
+  if [ -b /dev/mmcblk0p3 ]; then
+   e2fsck -p /dev/mmcblk0p3 >/dev/null 2>&1 || true
+   mount -t ext4 -o noatime,nodiratime,commit=5 /dev/mmcblk0p3 /data
+  fi
+
+  install -d -m 755 /data/settings /data/dropbear /data/bluetooth /data/overlay/opt/upper /data/overlay/opt/work
+  install -d -m 700 /data/identity /data/pairing /data/tls
+
+  # Writable OverlayFS on /opt/carfluxoid backed by /data (root SquashFS stays immutable)
+  mount -t overlay overlay \
+   -o lowerdir=/usr/share/carfluxoid,upperdir=/data/overlay/opt/upper,workdir=/data/overlay/opt/work \
+   /opt/carfluxoid
+
+  # Import credentials dropped onto FAT32 boot partition (from Mac/PC after flashing)
+  if [ -b /dev/mmcblk0p1 ] && mount -t vfat /dev/mmcblk0p1 /mnt/boot 2>/dev/null; then
+   for f in certificate.p7b identity.pk8; do
+    if [ -s "/mnt/boot/$f" ]; then
+     install -m 600 "/mnt/boot/$f" "/data/identity/$f"
+     rm -f "/mnt/boot/$f"
+    fi
+   done
+   for f in test-cert.pem test-key.pem; do
+    if [ -s "/mnt/boot/$f" ]; then
+     install -m 600 "/mnt/boot/$f" "/data/tls/$f"
+     rm -f "/mnt/boot/$f"
+    fi
+   done
+   if [ -s /mnt/boot/authorized_keys ]; then
+    install -d -m 700 /data/dropbear
+    install -m 600 /mnt/boot/authorized_keys /data/dropbear/authorized_keys
+   fi
+   if [ -s /mnt/boot/wifi-pass.txt ]; then
+    p=$(tr -d '\r\n' < /mnt/boot/wifi-pass.txt)
+    if [ "${#p}" -ge 8 ] && [ "${#p}" -le 63 ]; then
+     umask 077
+     printf 'AA_WIFI_SSID=CarFluxoid-Pi_AP\nAA_WIFI_PASSWORD=%s\n' "$p" > /data/radio.env
+    fi
+    rm -f /mnt/boot/wifi-pass.txt
+   fi
+   sync
+   umount /mnt/boot 2>/dev/null || true
+  fi
+
+  # Fall back to bundled reference TLS pair if user did not supply custom ones
+  for f in test-cert.pem test-key.pem; do
+   if [ ! -s "/data/tls/$f" ] && [ -s "/opt/carfluxoid/tls/$f" ]; then
+    install -m 600 "/opt/carfluxoid/tls/$f" "/data/tls/$f"
+   fi
+  done
+
+  # Generate random 24-hex WPA2 passphrase on first boot
+  if [ ! -s /data/radio.env ]; then
+   umask 077
+   pass=$(od -An -N 12 -tx1 /dev/urandom | tr -d ' \n')
+   printf 'AA_WIFI_SSID=CarFluxoid-Pi_AP\nAA_WIFI_PASSWORD=%s\n' "$pass" > /data/radio.env
+   sync
+  fi
+  ;;
+ stop)
+  sync
+  umount /opt/carfluxoid 2>/dev/null || true
+  umount /data 2>/dev/null || true
+  ;;
+esac

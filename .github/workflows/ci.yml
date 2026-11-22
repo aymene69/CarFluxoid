@@ -22,7 +22,7 @@ jobs:
 
       - name: Shell & Python checks
         run: |
-          for script in scripts/*.sh platforms/raspberrypi/*.sh; do
+          for script in scripts/*.sh platforms/raspberrypi/*.sh os/build.sh os/board/rpi02w/post-*.sh os/board/rpi02w/rootfs-overlay/etc/init.d/S* os/board/rpi02w/rootfs-overlay/usr/sbin/carfluxoid-*; do
             sh -n "$script"
           done
           python3 -m py_compile platforms/raspberrypi/dashboard/dashboard.py tooling/waiting_iphone_config.py scripts/fetch-tls.py scripts/encode-waiting-screens.py

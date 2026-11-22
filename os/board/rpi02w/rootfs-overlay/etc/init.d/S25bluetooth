@@ -1,0 +1,34 @@
+#!/bin/sh
+# Bring up Pi Zero 2 W PL011 Bluetooth (kernel serdev btbcm) and BlueZ bluetoothd.
+set -eu
+
+start() {
+ modprobe btbcm 2>/dev/null || true
+ modprobe hci_uart 2>/dev/null || true
+ rfkill unblock bluetooth 2>/dev/null || true
+
+ i=0
+ while [ "$i" -lt 40 ] && [ ! -d /sys/class/bluetooth/hci0 ]; do
+  sleep 0.1
+  i=$((i + 1))
+ done
+
+ # Fallback to hciattach if serdev did not attach hci0
+ if [ ! -d /sys/class/bluetooth/hci0 ] && command -v hciattach >/dev/null 2>&1 && [ -c /dev/ttyAMA0 ]; then
+  hciattach /dev/ttyAMA0 bcm43xx 921600 noflow - >/var/log/hciattach.log 2>&1 || true
+  sleep 0.5
+ fi
+
+ hciconfig hci0 up 2>/dev/null || true
+ /usr/sbin/carfluxoid-supervise start bluetoothd 1 -- /usr/libexec/bluetooth/bluetoothd -n --experimental
+}
+
+stop() {
+ /usr/sbin/carfluxoid-supervise stop bluetoothd
+}
+
+case "${1:-start}" in
+ start) start ;;
+ stop) stop ;;
+ restart) stop; start ;;
+esac

@@ -58,6 +58,7 @@ bridge-aa/
   tests/                 Native C protocol tests and Python HTTP/MTP runtime tests
 catplay/                 Pinned upstream CatPlay submodule (patched via patches/catplay.patch)
 docs/                    Architecture and installation guides
+os/                      CarFluxoidOS — dedicated Buildroot ARM64 appliance OS (SquashFS RO + low-power 1-USB profile)
 patches/                 Clean patch applied on top of catplay/
 platforms/raspberrypi/   ARM64 Dockerfile, build/test scripts, systemd units, installers, dashboard
 scripts/                 Submodule patcher, TLS fetcher, waiting screen encoder
@@ -86,9 +87,14 @@ make build     # compile aa-phone + catplay-aa-rx and create local/raspberrypi/c
 make test      # run Rust, C, HTTP, MTP, and dashboard test suites
 ```
 
-### 3. First-Time Pi Installation
+### 3. Installation — Two Ways
 
-See the step-by-step guide in [docs/INSTALL.md](docs/INSTALL.md) (building `aa_bulk.ko` against the Pi’s running kernel, running `install-base.sh`, `prepare-radio.sh`, and `install-dashboard.sh`).
+- **Option A — CarFluxoidOS (Recommended appliance image)**: build a ready-to-flash read-only SquashFS SD image (~5 s boot, power-cut proof, low-power single-USB profile, `aa_bulk.ko` prebuilt):
+  ```sh
+  make tls && make os-image && make os
+  ```
+  Flash `local/os/carfluxoid-os.img.xz` with Raspberry Pi Imager and drop your MFi files onto `CARFLUXBOOT`. See [os/README.md](os/README.md).
+- **Option B — Raspberry Pi OS Lite (64-bit)**: step-by-step setup on standard Raspberry Pi OS in [docs/INSTALL.md](docs/INSTALL.md).
 
 ### 4. Subsequent Updates (SSH or Web OTA)
 

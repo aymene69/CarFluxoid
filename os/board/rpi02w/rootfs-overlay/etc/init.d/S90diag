@@ -1,0 +1,14 @@
+#!/bin/sh
+# Launch bounded vehicle diagnostic snapshot collector in background.
+set -eu
+
+case "${1:-start}" in
+ start)
+  /usr/sbin/carfluxoid-diag >/dev/null 2>&1 &
+  echo "$!" > /run/carfluxoid-svc/carfluxoid-car-diag.pid
+  ;;
+ stop)
+  [ -r /run/carfluxoid-svc/carfluxoid-car-diag.pid ] && kill "$(cat /run/carfluxoid-svc/carfluxoid-car-diag.pid)" 2>/dev/null || true
+  rm -f /run/carfluxoid-svc/carfluxoid-car-diag.pid
+  ;;
+esac

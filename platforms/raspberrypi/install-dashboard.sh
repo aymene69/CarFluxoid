@@ -4,6 +4,9 @@ set -eu
 [ "$(id -u)" -eq 0 ]
 [ "$(uname -m)" = aarch64 ]
 cd "$(dirname "$0")"
+if [ -f /etc/carfluxoid-os ] && [ -x /usr/sbin/carfluxoid-ota-apply ];then
+ exec /usr/sbin/carfluxoid-ota-apply "$PWD"
+fi
 sha256sum -c SHA256SUMS
 if ! /usr/bin/python3 -c 'from PIL import Image' || ! command -v ffmpeg >/dev/null || ! test -r /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf;then
  apt-get update

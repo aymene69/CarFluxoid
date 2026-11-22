@@ -1,0 +1,27 @@
+#!/bin/sh
+# CarFluxoidOS OTA / SSH bundle applier (writes into OverlayFS /opt/carfluxoid backed by /data).
+set -eu
+[ "$(id -u)" -eq 0 ]
+[ "$(uname -m)" = aarch64 ]
+src=${1:-$PWD}
+cd "$src"
+
+sha256sum -c SHA256SUMS
+./catplay-aa-rx --self-test
+
+install -d -m 755 /opt/carfluxoid/bin /opt/carfluxoid/assets
+for binary in aa-phone catplay-aa-rx; do
+ install -m 755 "$binary" "/opt/carfluxoid/bin/$binary.new"
+ mv -f "/opt/carfluxoid/bin/$binary.new" "/opt/carfluxoid/bin/$binary"
+done
+install -m 755 dashboard.py /opt/carfluxoid/bin/dashboard.py
+install -m 644 waiting_iphone_config.py /opt/carfluxoid/assets/waiting_iphone_config.py
+sync
+
+/etc/init.d/S15usb restart
+/etc/init.d/S40dashboard restart
+/etc/init.d/S45radio restart
+# Restart web UI last (slightly delayed so HTTP OTA response completes cleanly)
+(sleep 1; /etc/init.d/S35web restart) >/dev/null 2>&1 &
+
+echo "CarFluxoidOS mis à jour avec succès."
