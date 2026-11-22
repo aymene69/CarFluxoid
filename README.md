@@ -92,11 +92,15 @@ See the step-by-step guide in [docs/INSTALL.md](docs/INSTALL.md) (building `aa_b
 
 ### 4. Subsequent Updates (SSH or Web OTA)
 
-- **Over SSH** (when connected to the Pi on `192.168.50.2` or your home network):
+Once CarFluxoid’s Wi-Fi AP has been activated (`CarFluxoid-Pi_AP`), the Pi stays on **`192.168.50.2`** and does not automatically return to your home Wi-Fi. Connect your laptop or phone to **`CarFluxoid-Pi_AP`**, then:
+
+- **Over SSH**:
   ```sh
-  make deploy HOST=aymene@192.168.50.2
+  make deploy
   ```
 - **Over the Web UI (OTA)**: open `http://192.168.50.2`, go to **Mise à jour (OTA)**, and upload `local/raspberrypi/carfluxoid-update.tar.gz`.
+
+*(To temporarily switch the Pi back to a saved home Wi-Fi network, run `sudo /opt/carfluxoid/bin/return-home.sh <HOME_UUID>` over SSH.)*
 
 ### 5. Vehicle Diagnostics
 

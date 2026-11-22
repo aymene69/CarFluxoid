@@ -108,3 +108,23 @@ On the first run, `install-dashboard.sh` installs `python3-pil`, `ffmpeg`, and `
 3. By default, **auto-start** switches to CarPlay after 2 s (tap any button on the menu during those 2 s to stay in the settings menu).
 4. Pair your iPhone with Bluetooth device **CarFluxoid** and accept CarPlay.
 5. Open `http://192.168.50.2` while connected to CarPlay Wi-Fi to customize sidebar position, theme (`Auto` follows car headlights), FPS, custom vehicle icon, view live GPS/diagnostics, or upload OTA updates.
+
+---
+
+## 8. Updating & Diagnostics After First Setup
+
+Once the AP profile (`carfluxoid-ap`) has been activated by the dashboard, the Pi remains in AP mode (**`CarFluxoid-Pi_AP`**, IP **`192.168.50.2`**) and does not switch back to your home Wi-Fi on its own.
+
+To deploy updates or pull logs later:
+1. Join the **`CarFluxoid-Pi_AP`** Wi-Fi network from your Mac/PC (passphrase stored in `/etc/carfluxoid/radio.env` on the Pi).
+2. Run:
+   ```sh
+   make deploy   # SSH update to aymene@192.168.50.2 (override with HOST=user@192.168.50.2)
+   make logs     # pull /var/lib/carfluxoid/car-diag.prev.log
+   ```
+   Or upload `local/raspberrypi/carfluxoid-update.tar.gz` directly from `http://192.168.50.2`.
+
+If you ever need Internet access on the Pi again (e.g. for `apt-get`), list saved NetworkManager profiles with `nmcli -f NAME,UUID connection show` and switch back via:
+```sh
+sudo /opt/carfluxoid/bin/return-home.sh <HOME_UUID>
+```
