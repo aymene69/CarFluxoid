@@ -42,10 +42,12 @@ int main(void){
  /* Next song: new session id. */
  int before=out_n;play(1);audio_pump(t+3000000,start);
  assert(out_n==before+2&&out_id[before]==0x8001&&out_body[before][1]==2&&out_id[before+1]==0);
- /* Focus loss while playing: STOP; re-request only after the retry delay. */
- audio_on_focus(3);assert(out_id[out_n-1]==0x8002&&!audio_streaming&&!audio_focus);
+ /* Focus loss while playing: STOP + hold off re-request during cooldown (prevents stealing focus back after Pause). */
+ audio_on_focus_at(3,t+3000000);assert(out_id[out_n-1]==0x8002&&!audio_streaming&&!audio_focus);
  before=out_n;unsigned dropped=audio_discarded;play(1);audio_pump(t+3100000,start);
- assert(out_n==before+1&&out_id[before]==0x12&&out_body[before][1]==1&&audio_discarded==dropped+1);
+ assert(out_n==before&&audio_discarded==dropped+1); /* trailing PCM discarded without stealing focus */
+ play(1);audio_pump(t+3000000+AUDIO_FOCUS_RETRY_US+1,start);
+ assert(out_n==before+1&&out_id[before]==0x12&&out_body[before][1]==1&&audio_discarded==dropped+2);
  /* Silence for 15 s: focus released. */
  audio_on_focus(1);audio_pump(t+30000000,start);
  assert(out_id[out_n-1]==0x12&&out_body[out_n-1][1]==4&&!audio_focus&&!audio_last);

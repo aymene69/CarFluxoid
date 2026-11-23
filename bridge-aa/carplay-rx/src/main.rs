@@ -331,6 +331,7 @@ impl AirPlayReceiverSink for Receiver {
    let mut siri_pressed=false;
    let mut knob_buttons=0;
    let mut media_release:Option<tokio::task::JoinHandle<()>>=None;
+   let mut tel_release:Option<tokio::task::JoinHandle<()>>=None;
    let mut siri_release:Option<tokio::task::JoinHandle<()>>=None;
    let (w,h)=display_size();
    let touch_hid=touch_device();
@@ -374,8 +375,18 @@ impl AirPlayReceiverSink for Receiver {
        }
       }
       0x21 if state<=4 => {
+       if let Some(t)=tel_release.take(){t.abort();}
        let report=catplay_hid::TelephonyButtonsReport::new(state.into()).to_bytes();
        handle.send_hid_report(now,&telephony_hid,&report);
+       if state!=0 {
+        // Auto-release after 50 ms for head units (Uconnect VP2) that send isDown=1 without release.
+        let h2=handle.clone();let t2=telephony_hid.clone();
+        tel_release=Some(tokio::spawn(async move{
+         tokio::time::sleep(Duration::from_millis(50)).await;
+         let up=catplay_hid::TelephonyButtonsReport::new(catplay_hid::TelephonyButton::Up).to_bytes();
+         h2.send_hid_report(Instant::now(),&t2,&up);
+        }));
+       }
       }
       0x22 if state==2 => {
        // Uconnect VP2 VR long-press arrives without release: Prewarm -> ButtonDown -> ButtonUp.

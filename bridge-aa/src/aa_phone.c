@@ -538,17 +538,32 @@ static void audio_stop(const char *why){
  media_status_update(3);
  session_trace("AUDIO_STOP session=%u %s sent=%u acks=%u",audio_session,why,audio_sent,audio_acks);
 }
-static void audio_on_focus(unsigned state){
+static int forward_input_report(const unsigned char *report,size_t len);
+static void audio_on_focus_at(unsigned state,uint64_t now){
  if(state==7){
   /* AUDIO_FOCUS_STATE_GAIN_TRANSIENT_GUIDANCE_ONLY (Uconnect VP2 reply to MAY_DUCK). */
   audio_focus=0;guidance_focus=2;
   audio_stop("guidance_only");
+  session_trace("AUDIO_FOCUS state=%u guidance_only",state);
   return;
  }
  audio_focus=state==1||state==2||state==4||state==6?2:0;
- if(audio_focus)guidance_focus=0;
- else{audio_stop("focus_lost");guidance_focus=0;guidance_stop("focus_lost");}
+ if(audio_focus){
+  guidance_focus=0;
+  session_trace("AUDIO_FOCUS state=%u granted",state);
+ }else{
+  int was_streaming=audio_streaming,pause_sent=0;
+  audio_stop("focus_lost");guidance_focus=0;guidance_stop("focus_lost");
+  /* Hold off focus re-request while the iPhone flushes its RTP buffer after Pause. */
+  audio_focus_at=now?now:1;
+  if(was_streaming&&(state==3||state==5)){
+   unsigned char pause_cmd[]={0x20,2};
+   pause_sent=forward_input_report(pause_cmd,sizeof pause_cmd);
+  }
+  session_trace("AUDIO_FOCUS state=%u lost pause_sent=%d",state,pause_sent);
+ }
 }
+static void audio_on_focus(unsigned state){audio_on_focus_at(state,audio_last?audio_last:now_us());}
 static void audio_on_ack(const unsigned char *body,size_t len){
  int ack=(int)value(body,len,2,1);
  if(!audio_acks)session_trace("RX audio ack first %s unacked=%d",hex16(body,len),audio_unacked);
@@ -706,6 +721,7 @@ static const struct {
  {0x54,0x22,1}, {0x55,0x20,3}, {0x56,0x20,10}, {0x57,0x20,4}, {0x58,0x20,5},
  {0x59,0x20,11}, {0x5a,0x20,12}, {0x5b,0x21,4},
  {0x7e,0x20,1}, {0x7f,0x20,2}, {0xa4,0x20,9}, {0xdb,0x22,1}, {0xe7,0x22,1},
+ {0x10004,0x21,1},
 };
 enum { AA_SCROLL_WHEEL=65536 };
 enum { INPUT_BINDING_COUNT=sizeof input_bindings/sizeof *input_bindings };
@@ -1618,7 +1634,7 @@ int main(int argc,char **argv){
   if(has_bt){snprintf(path,sizeof path,"%s.btmac",getenv("AA_VIDEO_SOCKET"));FILE *bf=fopen(path,"w");if(bf){fprintf(bf,"%s\n",bt_mac);fclose(bf);}fprintf(stderr,"AA_BT_MAC mac=%s\n",bt_mac);}
  }if(selected_codec==7){char path[4096];snprintf(path,sizeof path,"%s.hevc",argv[5]);FILE *hf=fopen(path,"rb");if(!hf)die("HEVC test frame");vn=fread(video,1,sizeof video,hf);if(!vn||!feof(hf)){fclose(hf);return 1;}fclose(hf);}open_video(video_ch);if(input_channel>0)open_video(input_channel);if(audio_channel>0)open_video(audio_channel);if(guidance_channel>0)open_video(guidance_channel);if(mic_channel>0)open_video(mic_channel);if(media_status_channel>0)open_video(media_status_channel);if(sensor_channel>0)open_video(sensor_channel);}
   else if(rx_ch==0&&id==11){if(ping_seen==1)fprintf(stderr,"AA_PING_RX active\n");send_msg(0,11,12,body,len);}
-  else if(rx_ch==0&&id==0x13)audio_on_focus((unsigned)value(body,len,1,0));
+  else if(rx_ch==0&&id==0x13)audio_on_focus_at((unsigned)value(body,len,1,0),now_us());
   else if(rx_ch==0&&id==15){fprintf(stderr,"AA_BYEBYE_RX reason=%llu\n",(unsigned long long)value(body,len,1,0));send_msg(0,11,16,"",0);break;}
   else if(rx_ch==mic_channel&&id==8){
    /* Uconnect VP2 rejects 0x8000 SETUP on MediaSourceService with 0x00ff; channel is ready directly on OPEN_RESPONSE. */
@@ -1655,6 +1671,14 @@ int main(int argc,char **argv){
     if(media_meta_len)send_msg(media_status_channel,11,0x8003,media_meta_buf,media_meta_len);
     if(audio_streaming)media_status_update(2);
    }
+  }
+  else if(rx_ch==media_status_channel&&id==0x8002){
+   unsigned input_ev=(unsigned)value(body,len,1,0);
+   unsigned char btn=input_ev==1?1:input_ev==2?2:input_ev==3?5:input_ev==4?4:0;
+   int fwd=0;
+   if(btn){unsigned char rep[]={0x20,btn};fwd=forward_input_report(rep,sizeof rep);}
+   fprintf(stderr,"AA_MEDIA_INPUT ev=%u btn=%u fwd=%d hex=%s\n",input_ev,btn,fwd,hex16(body,len));
+   session_trace("AA_MEDIA_INPUT ev=%u btn=%u fwd=%d hex=%s",input_ev,btn,fwd,hex16(body,len));
   }
   else if(rx_ch==guidance_channel&&id==8){unsigned char setup[]={8,1};send_msg(guidance_channel,11,0x8000,setup,sizeof setup);}
   else if(rx_ch==guidance_channel&&id==0x8003)guidance_on_config(body,len);
