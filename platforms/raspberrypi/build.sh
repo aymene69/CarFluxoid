@@ -40,6 +40,11 @@ cc $pi_cflags -DSYS_io_pgetevents_time64=SYS_io_pgetevents \
 
 export CARGO_TARGET_DIR=/build/pi/target
 export OPENSSL_NO_VENDOR=1
+CARFLUXOID_VERSION=$(tr -d '\r\n' < /input/VERSION 2>/dev/null || echo dev)
+git_rev=$(git -c safe.directory=/input -C /input rev-parse --short HEAD 2>/dev/null || echo local)
+CARFLUXOID_BUILD="$(date -u +%Y%m%d-%H%M)-${git_rev}"
+export CARFLUXOID_VERSION CARFLUXOID_BUILD
+echo "Building CarFluxoid v${CARFLUXOID_VERSION} (build ${CARFLUXOID_BUILD})"
 cargo build --release --locked --manifest-path /input/bridge-aa/carplay-rx/Cargo.toml
 cp "$CARGO_TARGET_DIR/release/catplay-aa-rx" "$out/catplay-aa-rx"
 strip "$out/aa-phone" "$out/catplay-aa-rx"

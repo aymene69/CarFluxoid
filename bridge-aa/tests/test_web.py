@@ -70,6 +70,7 @@ try:
  # Diagnostic, logs and OTA validation endpoints.
  st,diag_raw=req('GET','/diag');assert st==200
  diag=json.loads(diag_raw)
+ assert diag['version'] and diag['build'] and diag['slot']
  assert diag['display']=='800x480 (marges 0x32)'
  assert diag['night_mode']=='nuit'
  assert diag['bt_mac']=='02:11:22:33:44:55'

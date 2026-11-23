@@ -1,5 +1,7 @@
 use std::{io::{Read,Write},net::{TcpListener,TcpStream},path::{Path,PathBuf},process::{Command,Stdio},time::{Duration,SystemTime,UNIX_EPOCH}};
 const HTML:&str=include_str!("../assets/settings.html");
+const APP_VERSION:&str=match option_env!("CARFLUXOID_VERSION"){Some(v)=>v,None=>"dev"};
+const APP_BUILD:&str=match option_env!("CARFLUXOID_BUILD"){Some(b)=>b,None=>"local"};
 const MAX_OTA_BYTES:usize=24*1024*1024;
 const MAX_LOG_BYTES:usize=128*1024;
 fn dir()->PathBuf{std::env::var_os("AA_SETTINGS_DIR").map(PathBuf::from).unwrap_or_else(||"/persist/aa-settings".into())}
@@ -121,6 +123,13 @@ fn service_state(name:&str)->String{
  }
  "unknown".into()
 }
+fn os_slot()->&'static str{
+ match read_trimmed("/proc/cmdline").as_deref() {
+  Some(cmd) if cmd.contains("root=/dev/mmcblk0p2")=>"Slot A (p2)",
+  Some(cmd) if cmd.contains("root=/dev/mmcblk0p3")=>"Slot B (p3)",
+  _=>"Standard",
+ }
+}
 fn diag_json()->String{
  let temp_c=read_trimmed("/sys/class/thermal/thermal_zone0/temp")
   .and_then(|s|s.parse::<f64>().ok()).map(|m|format!("{:.1}",m/1000.0)).unwrap_or_else(||"n/a".into());
@@ -149,7 +158,8 @@ fn diag_json()->String{
  let rx_bytes=read_trimmed("/sys/module/aa_bulk/parameters/rx_bytes").unwrap_or_else(||"0".into());
  let tx_bytes=read_trimmed("/sys/module/aa_bulk/parameters/tx_bytes").unwrap_or_else(||"0".into());
  format!(
-  r#"{{"temp_c":"{}","throttled":"{}","uptime_s":{},"display":"{}","night_mode":"{}","bt_mac":"{}","gps":"{}","guidance":"{}","carplay_active":{},"usb_online":"{}","accessory_active":"{}","rx_bytes":"{}","tx_bytes":"{}","services":{{"aa":"{}","radio":"{}","dashboard":"{}","diag":"{}"}}}}"#,
+  r#"{{"version":"{}","build":"{}","slot":"{}","temp_c":"{}","throttled":"{}","uptime_s":{},"display":"{}","night_mode":"{}","bt_mac":"{}","gps":"{}","guidance":"{}","carplay_active":{},"usb_online":"{}","accessory_active":"{}","rx_bytes":"{}","tx_bytes":"{}","services":{{"aa":"{}","radio":"{}","dashboard":"{}","diag":"{}"}}}}"#,
+  json_escape(APP_VERSION),json_escape(APP_BUILD),json_escape(os_slot()),
   json_escape(&temp_c),json_escape(&throttled),uptime_s,json_escape(&display),night_mode,
   json_escape(&bt_mac),json_escape(&gps),json_escape(&guidance),carplay_active,
   json_escape(&usb_online),json_escape(&accessory),json_escape(&rx_bytes),json_escape(&tx_bytes),
