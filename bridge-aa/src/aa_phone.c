@@ -355,16 +355,28 @@ static int pb_put_field_bytes(unsigned char *out,size_t cap,size_t *pos,unsigned
 }
 static unsigned char media_meta_buf[512];
 static size_t media_meta_len;
+static unsigned media_elapsed_secs;
 static char media_source_name[64]="CarPlay";
+static void send_default_media_meta(void){
+ if(media_status_channel<=0||!media_status_ready||media_meta_len)return;
+ unsigned char msg[64];size_t pos=0;
+ const char *song="CarPlay",*artist="CarFluxoid";
+ if(pb_put_field_bytes(msg,sizeof msg,&pos,1,(const unsigned char*)song,strlen(song)))return;
+ if(pb_put_field_bytes(msg,sizeof msg,&pos,2,(const unsigned char*)artist,strlen(artist)))return;
+ send_msg(media_status_channel,11,0x8003,msg,pos);
+ session_trace("AA_MEDIA_META_DEFAULT ch=%d bytes=%zu",media_status_channel,pos);
+}
 static void media_status_update(unsigned state){
  if(media_status_channel<=0||!media_status_ready)return;
- /* MediaPlaybackStatus (0x8001): field 1 = state (1=STOPPED, 2=PLAYING, 3=PAUSED), field 2 = source. */
+ if(state==2&&!media_meta_len)send_default_media_meta();
+ /* MediaPlaybackStatus (0x8001): field 1 = state (1=STOPPED, 2=PLAYING, 3=PAUSED), field 2 = source, field 3 = playback_seconds. */
  unsigned char msg[96];size_t pos=0;
  const char *src=media_source_name[0]?media_source_name:"CarPlay";
  if(pb_put_field_varint(msg,sizeof msg,&pos,1,state))return;
  if(pb_put_field_bytes(msg,sizeof msg,&pos,2,(const unsigned char*)src,strlen(src)))return;
+ if(pb_put_field_varint(msg,sizeof msg,&pos,3,media_elapsed_secs))return;
  send_msg(media_status_channel,11,0x8001,msg,pos);
- session_trace("AA_MEDIA_STATUS ch=%d state=%u src=%s",media_status_channel,state,src);
+ session_trace("AA_MEDIA_STATUS ch=%d state=%u pos=%us src=%s",media_status_channel,state,media_elapsed_secs,src);
 }
 /* Decode compact 0x30 NowPlaying datagram into AA MediaPlaybackMetadata (0x8003) protobuf. */
 static size_t encode_media_metadata(unsigned char *out,size_t cap,const unsigned char *pkt,size_t plen,unsigned *out_state,char app_out[64]){
@@ -380,6 +392,7 @@ static size_t encode_media_metadata(unsigned char *out,size_t cap,const unsigned
   if(at+fl>plen)return 0;
   fields[f]=pkt+at;flens[f]=fl;at+=fl;
  }
+ media_elapsed_secs=(at+2<=plen)?((unsigned)pkt[at]|((unsigned)pkt[at+1]<<8)):0;
  size_t pos=0;
  if(pb_put_field_bytes(out,cap,&pos,1,fields[0],flens[0]))return 0; /* song/title */
  if(pb_put_field_bytes(out,cap,&pos,2,fields[1],flens[1]))return 0; /* artist */
@@ -402,7 +415,9 @@ static void media_metadata_on_control(const unsigned char *pkt,size_t plen){
  if(media_status_channel>0&&media_status_ready){
   send_msg(media_status_channel,11,0x8003,media_meta_buf,media_meta_len);
   if(state>=1&&state<=3)media_status_update(state);
-  session_trace("AA_MEDIA_META ch=%d bytes=%zu state=%u src=%s",media_status_channel,media_meta_len,state,media_source_name);
+  else if(audio_streaming)media_status_update(2);
+  fprintf(stderr,"AA_MEDIA_META ch=%d bytes=%zu state=%u pos=%us src=%s\n",media_status_channel,media_meta_len,state,media_elapsed_secs,media_source_name);
+  session_trace("AA_MEDIA_META ch=%d bytes=%zu state=%u pos=%us src=%s",media_status_channel,media_meta_len,state,media_elapsed_secs,media_source_name);
  }
 }
 /* Dedicated AA Guidance audio sink (e.g. Uconnect VP2 ch=5, 16 kHz mono PCM16) for Waze/Siri prompts. */

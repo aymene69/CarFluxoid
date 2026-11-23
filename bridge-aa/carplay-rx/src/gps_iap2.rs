@@ -2,7 +2,10 @@
 //! SensorSourceService) to the iPhone as standard NMEA 0183 LocationInformation sentences.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,9 +15,10 @@ use catplay_csm::{
     msg::{
         DeviceTimeUpdate, EngineTypes, IdentificationInformation, LocationInformation,
         LocationInformationComponent, NowPlayingUpdate, PlaybackStatus, PowerProvidingCapability,
-        StartLocationInformation, StartNowPlayingUpdates, StartNowPlayingUpdatesMediaItemAttributes,
-        StartNowPlayingUpdatesPlaybackAttributes, StopLocationInformation, StopNowPlayingUpdates,
-        VehicleInformationComponent, WirelessCarPlayTransportComponent,
+        SetNowPlayingInformation, StartLocationInformation, StartNowPlayingUpdates,
+        StartNowPlayingUpdatesMediaItemAttributes, StartNowPlayingUpdatesPlaybackAttributes,
+        StopLocationInformation, StopNowPlayingUpdates, VehicleInformationComponent,
+        WirelessCarPlayTransportComponent,
     },
 };
 use catplay_iap2_client::{
@@ -381,9 +385,11 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Encode NowPlaying fields into the compact `0x30` control datagram read by `aa-phone`.
+/// Appends 2-byte LE `elapsed_secs` after the 4 length-prefixed UTF-8 strings.
 pub fn encode_now_playing_packet(
     state: u8,
     duration_secs: u16,
+    elapsed_secs: u16,
     title: &str,
     artist: &str,
     album: &str,
@@ -395,7 +401,7 @@ pub fn encode_now_playing_packet(
         truncate_utf8(album, 96).as_bytes(),
         truncate_utf8(app, 48).as_bytes(),
     ];
-    let mut out = Vec::with_capacity(8 + fields.iter().map(|f| f.len()).sum::<usize>());
+    let mut out = Vec::with_capacity(10 + fields.iter().map(|f| f.len()).sum::<usize>());
     out.push(0x30);
     out.push(state);
     out.extend_from_slice(&duration_secs.to_le_bytes());
@@ -403,6 +409,7 @@ pub fn encode_now_playing_packet(
         out.push(f.len() as u8);
         out.extend_from_slice(f);
     }
+    out.extend_from_slice(&elapsed_secs.to_le_bytes());
     out
 }
 
@@ -414,11 +421,15 @@ pub struct GpsIap2Session {
     now_playing: Option<NowPlayingUpdate>,
     last_meta_packet: Vec<u8>,
     now_playing_started: bool,
+    now_playing_received: Arc<AtomicBool>,
+    session_alive: Arc<AtomicBool>,
 }
 
 impl Drop for GpsIap2Session {
     fn drop(&mut self) {
+        self.session_alive.store(false, Ordering::SeqCst);
         self.hub.clear_handle();
+        eprintln!("CP_IAP2_DROPPED");
     }
 }
 
@@ -433,6 +444,8 @@ impl GpsIap2Session {
             now_playing: None,
             last_meta_packet: Vec::new(),
             now_playing_started: false,
+            now_playing_received: Arc::new(AtomicBool::new(false)),
+            session_alive: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -458,6 +471,7 @@ impl GpsIap2Session {
     }
 
     fn forward_now_playing(&mut self, update: NowPlayingUpdate) {
+        self.now_playing_received.store(true, Ordering::SeqCst);
         match &mut self.now_playing {
             Some(current) => current.deep_merge(update),
             None => self.now_playing = Some(update),
@@ -467,12 +481,21 @@ impl GpsIap2Session {
         };
         let item = np.media_item_attributes.as_ref();
         let pb = np.playback_attributes.as_ref();
-        let title = item.and_then(|m| m.media_item_title.as_deref()).unwrap_or("");
+        let raw_title = item.and_then(|m| m.media_item_title.as_deref()).unwrap_or("");
         let artist = item.and_then(|m| m.media_item_artist.as_deref()).unwrap_or("");
         let album = item.and_then(|m| m.media_item_album_title.as_deref()).unwrap_or("");
         let app = pb.and_then(|p| p.playback_app_name.as_deref()).unwrap_or("CarPlay");
+        let title = if raw_title.is_empty() && artist.is_empty() && album.is_empty() {
+            app
+        } else {
+            raw_title
+        };
         let duration_secs = item
             .and_then(|m| m.media_item_playback_duration_in_milliseconds)
+            .map(|ms| (ms / 1000).min(u32::from(u16::MAX)) as u16)
+            .unwrap_or(0);
+        let elapsed_secs = pb
+            .and_then(|p| p.playback_elapsed_time_in_milliseconds)
             .map(|ms| (ms / 1000).min(u32::from(u16::MAX)) as u16)
             .unwrap_or(0);
         let state = match pb.and_then(|p| p.playback_status) {
@@ -481,10 +504,7 @@ impl GpsIap2Session {
             Some(PlaybackStatus::Stopped) => 1,
             _ => 0,
         };
-        if title.is_empty() && artist.is_empty() && album.is_empty() {
-            return;
-        }
-        let pkt = encode_now_playing_packet(state, duration_secs, title, artist, album, app);
+        let pkt = encode_now_playing_packet(state, duration_secs, elapsed_secs, title, artist, album, app);
         if pkt == self.last_meta_packet {
             return;
         }
@@ -493,7 +513,9 @@ impl GpsIap2Session {
             let _ = sock.set_nonblocking(true);
             let _ = sock.send_to(&pkt, format!("{}.control", self.socket));
         }
-        eprintln!("CP_NOW_PLAYING state={state} dur={duration_secs}s title={title:?} artist={artist:?}");
+        eprintln!(
+            "CP_NOW_PLAYING state={state} pos={elapsed_secs}/{duration_secs}s app={app:?} title={title:?} artist={artist:?}"
+        );
     }
 
     pub fn build_identification(display_name: &str) -> IdentificationInformation {
@@ -510,6 +532,7 @@ impl GpsIap2Session {
             LocationInformation::PACKET_ID,
             StartNowPlayingUpdates::PACKET_ID,
             StopNowPlayingUpdates::PACKET_ID,
+            SetNowPlayingInformation::PACKET_ID,
         ]);
         id.messages_received_from_device = IdentificationInformation::pack_ids(&[
             StartLocationInformation::PACKET_ID,
@@ -588,12 +611,33 @@ impl CsmSession for GpsIap2Session {
                     self.now_playing_started = true;
                     match handle.send(&Self::start_now_playing_request()) {
                         Ok(()) => eprintln!("CP_NOW_PLAYING_SUBSCRIBED"),
-                        Err(err) => log::warn!("CP_NOW_PLAYING_SUBSCRIBE failed: {err:?}"),
+                        Err(err) => eprintln!("CP_NOW_PLAYING_SUBSCRIBE failed: {err:?}"),
                     }
+                    // Retry StartNowPlayingUpdates after the CarPlay audio/media session settles
+                    // in case iOS ignored the immediate post-IdentificationAccepted request.
+                    let retry_handle = handle.clone();
+                    let received = self.now_playing_received.clone();
+                    let alive = self.session_alive.clone();
+                    tokio::spawn(async move {
+                        for delay in [3u64, 5u64] {
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                            if !alive.load(Ordering::SeqCst) || received.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            match retry_handle.send(&Self::start_now_playing_request()) {
+                                Ok(()) => eprintln!("CP_NOW_PLAYING_RESUBSCRIBED delay={delay}s"),
+                                Err(err) => {
+                                    eprintln!("CP_NOW_PLAYING_RESUBSCRIBE failed: {err:?}");
+                                    break;
+                                }
+                            }
+                        }
+                    });
                 }
             }
             return Ok(());
         }
+        eprintln!("CP_IAP2_RX unhandled={packet:?}");
         Ok(())
     }
 }
@@ -699,7 +743,7 @@ mod tests {
     #[test]
     fn encodes_now_playing_metadata_with_utf8_safe_truncation() {
         let long_title = "é".repeat(60); // 120 bytes UTF-8
-        let pkt = encode_now_playing_packet(2, 245, &long_title, "Daft Punk", "Discovery", "Spotify");
+        let pkt = encode_now_playing_packet(2, 245, 42, &long_title, "Daft Punk", "Discovery", "Spotify");
         assert_eq!(pkt[0], 0x30);
         assert_eq!(pkt[1], 2);
         assert_eq!(u16::from_le_bytes([pkt[2], pkt[3]]), 245);
@@ -709,5 +753,6 @@ mod tests {
         let a_off = 5 + tlen;
         assert_eq!(pkt[a_off] as usize, 9);
         assert_eq!(&pkt[a_off + 1..a_off + 10], b"Daft Punk");
+        assert_eq!(u16::from_le_bytes([pkt[pkt.len() - 2], pkt[pkt.len() - 1]]), 42);
     }
 }

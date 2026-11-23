@@ -116,17 +116,18 @@ int main(void){
  audio_on_focus(3);
  assert(guidance_focus==0&&audio_focus==0);
 
- /* NowPlaying 0x30 datagram -> MediaPlaybackMetadata protobuf (fields 1,2,3,6). */
+ /* NowPlaying 0x30 datagram -> MediaPlaybackMetadata protobuf (fields 1,2,3,6) + elapsed_secs. */
  const unsigned char np[]={
   0x30, 2, 245, 0,
   9,'O','n','e',' ','M','o','r','e','!',
   9,'D','a','f','t',' ','P','u','n','k',
   9,'D','i','s','c','o','v','e','r','y',
   7,'S','p','o','t','i','f','y',
+  42, 0,
  };
  unsigned char meta[128];unsigned st=0;char app[64]={0};
  size_t mlen=encode_media_metadata(meta,sizeof meta,np,sizeof np,&st,app);
- assert(mlen>0&&st==2&&strcmp(app,"Spotify")==0);
+ assert(mlen>0&&st==2&&strcmp(app,"Spotify")==0&&media_elapsed_secs==42);
  assert(value(meta,mlen,6,0)==245);
  size_t mi=0,ml;unsigned mt;uint64_t mv;const unsigned char *mb;
  int saw_song=0,saw_artist=0,saw_album=0;
