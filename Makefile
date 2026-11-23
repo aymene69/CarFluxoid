@@ -54,8 +54,7 @@ os:
 		$(OS_IMAGE) sh /input/os/build.sh
 
 deploy:
-	scp -r local/raspberrypi/update-bundle $(HOST):/tmp/carfluxoid-update
-	ssh -t $(HOST) 'if [ "$$(id -u)" -eq 0 ]; then /tmp/carfluxoid-update/install-dashboard.sh; else sudo /tmp/carfluxoid-update/install-dashboard.sh; fi && rm -rf /tmp/carfluxoid-update'
+	tar -C local/raspberrypi/update-bundle -cf - . | ssh $(HOST) 'rm -rf /tmp/carfluxoid-update && mkdir -p /tmp/carfluxoid-update && tar -xf - -C /tmp/carfluxoid-update && if [ "$$(id -u)" -eq 0 ]; then /tmp/carfluxoid-update/install-dashboard.sh; else sudo /tmp/carfluxoid-update/install-dashboard.sh; fi && rm -rf /tmp/carfluxoid-update'
 
 os-update:
 	@test -s local/os/carfluxoid-os-update.tar || { echo "Missing local/os/carfluxoid-os-update.tar — run 'make os' first" >&2; exit 1; }
@@ -71,5 +70,6 @@ restore:
 	ssh $(HOST) 'tar -C /data -xzf - && sync && (sleep 1; reboot) >/dev/null 2>&1 &' < local/os/data-backup.tar.gz
 
 logs:
-	ssh -t $(HOST) 'if [ "$$(id -u)" -eq 0 ]; then cp /var/lib/carfluxoid/car-diag.prev.log /tmp/car-diag.log && chmod 644 /tmp/car-diag.log; else sudo cp /var/lib/carfluxoid/car-diag.prev.log /tmp/car-diag.log && sudo chmod 644 /tmp/car-diag.log; fi'
-	scp $(HOST):/tmp/car-diag.log local/raspberrypi/car-diag-last.log
+	@mkdir -p local/raspberrypi
+	ssh $(HOST) 'if [ "$$(id -u)" -eq 0 ]; then cat /var/lib/carfluxoid/car-diag.prev.log; else sudo cat /var/lib/carfluxoid/car-diag.prev.log; fi' > local/raspberrypi/car-diag-last.log
+	@ls -lh local/raspberrypi/car-diag-last.log
