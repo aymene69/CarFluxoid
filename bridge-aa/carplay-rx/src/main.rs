@@ -115,13 +115,19 @@ impl Audio {
   }
  }
 }
-struct Screen { pipe:UnixStream, start:Instant, config:Option<AvccConfigExtended>, last_slow:Option<Instant> }
+struct Screen { pipe:UnixStream, start:Instant, config:Option<AvccConfigExtended>, last_slow:Option<Instant>, airplay_control:Option<String> }
 #[async_trait]
 impl ScreenReceiverSink for Screen {
  async fn init(&mut self)->RtspResult<()>{Ok(())}
  async fn set_avcc_config(&mut self,c:AvccConfigExtended)->RtspResult<()>{
   if c.hevc{return Err(RtspError::UnexpectedState("AA bridge currently requires H264".into()));}
-  log::info!("CarPlay video configuration {}x{}",c.width,c.height);self.config=Some(c);Ok(())
+  if let Some(ctrl)=&self.airplay_control {
+   eprintln!("AIRPLAY_VIDEO_CONFIG {}x{}",c.width,c.height);
+   if let Ok(s)=std::os::unix::net::UnixDatagram::unbound(){let _=s.set_nonblocking(true);let _=s.send_to(&[5],ctrl);}
+  }else{
+   log::info!("CarPlay video configuration {}x{}",c.width,c.height);
+  }
+  self.config=Some(c);Ok(())
  }
  async fn process_frame(&mut self,f:EncodedVideoFrame)->RtspResult<()>{
   if let Some(c)=f.config{self.set_avcc_config(c).await?;}
@@ -322,6 +328,7 @@ impl AirPlayReceiverSink for Receiver {
     ACTIVE_CARPLAY_SESSIONS.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
    }
    let _=std::fs::write(format!("{}.airplay",self.socket),"active\n");
+   if let Ok(s)=std::os::unix::net::UnixDatagram::unbound(){let _=s.set_nonblocking(true);let _=s.send_to(&[5],format!("{}.control",self.socket));}
    eprintln!("AIRPLAY_SESSION_START");
    return Ok(());
   }
@@ -545,7 +552,13 @@ impl AirPlayReceiverSink for Receiver {
  }
  async fn open_screen(&mut self,_:Duration)->RtspResult<ScreenReceiverSinkBox>{
   let pipe=UnixStream::connect(&self.socket).await.map_err(|_|RtspError::Closed)?;
-  Ok(Box::new(Screen{pipe,start:Instant::now(),config:None,last_slow:None}))
+  let airplay_control=if self.is_airplay {
+   let ctrl=format!("{}.control",self.socket);
+   if let Ok(s)=std::os::unix::net::UnixDatagram::unbound(){let _=s.set_nonblocking(true);let _=s.send_to(&[5],&ctrl);}
+   eprintln!("AIRPLAY_SCREEN_OPEN");
+   Some(ctrl)
+  }else{None};
+  Ok(Box::new(Screen{pipe,start:Instant::now(),config:None,last_slow:None,airplay_control}))
  }
 }
 impl AsyncShutdown for Receiver {}

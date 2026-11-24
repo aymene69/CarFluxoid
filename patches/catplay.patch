@@ -1,5 +1,5 @@
 diff --git a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
-index 97a52b4..caf7cd9 100644
+index 97a52b4..ce97433 100644
 --- a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
 +++ b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
 @@ -2,7 +2,7 @@ use async_trait::async_trait;
@@ -122,10 +122,13 @@ index 97a52b4..caf7cd9 100644
          }
  
          Ok(())
-@@ -890,7 +922,16 @@ impl AirPlayReceiver {
-         self.sink.init(handle.clone())?;
-         self.sink_had_init = true;
+@@ -887,10 +919,16 @@ impl AirPlayReceiver {
+             self.close_pending_tx.clone(),
+         ));
  
+-        self.sink.init(handle.clone())?;
+-        self.sink_had_init = true;
+-
 -        let lock = self.shared.lock(handle.clone());
 +        let mut lock = self.shared.lock(handle.clone());
 +        if lock.is_none() && self.profile == AirPlayReceiverProfile::AppleTV {
@@ -140,17 +143,21 @@ index 97a52b4..caf7cd9 100644
          if lock.is_none() {
              warn!("Rejected incoming AirPlay connection, because session is already active!");
              return Err(RtspError::Code(HttpStatus::NotEnoughBandwidth));
-@@ -900,10 +941,6 @@ impl AirPlayReceiver {
+@@ -898,11 +936,10 @@ impl AirPlayReceiver {
  
-         self.sink.on_initial_setup().await?;
+         self.lock.replace(lock.unwrap());
+ 
+-        self.sink.on_initial_setup().await?;
++        self.sink.init(handle.clone())?;
++        self.sink_had_init = true;
  
 -        if self.features.contains(AirPlayFeature::CAR) && self.wireless {
 -            self.init_iap2(handle.clone()).await;
 -        }
--
++        self.sink.on_initial_setup().await?;
+ 
          let (keep_alive_socket, keep_alive_bind) = UdpHelper::bind(bind_ip, KeepAliveServer::new())?;
  
-         // Never enable a feature that the device did not offer
 @@ -995,6 +1032,9 @@ impl AirPlayReceiver {
                  Ok(RtspResponse::new(None, HttpStatus::Ok))
              }
