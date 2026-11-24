@@ -582,6 +582,7 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "macaddr",
  "openssl",
  "tokio",
 ]

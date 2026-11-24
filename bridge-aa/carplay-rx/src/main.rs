@@ -4,7 +4,7 @@ mod microphone;
 mod gps_iap2;
 use std::{io::{Error,ErrorKind,IoSlice},sync::Arc,time::{Duration,Instant}};
 use async_trait::async_trait;
-use catplay_carplay::{carplay_rx::{AirPlayReceiverSink,sink::AirPlayServerShared},
+use catplay_carplay::{carplay_rx::{AirPlayReceiverProfile,AirPlayReceiverSink,sink::{AirPlayServer,AirPlayServerShared}},
  msg::{Display,InfoMessageResponse},rtsp_frame::{RtspError,RtspResult},
  screen::rx::{ScreenReceiverSink,ScreenReceiverSinkBox},video::{AvccConfigExtended,EncodedVideoFrame}};
 use catplay_carplay_rx_gadget::CarPlayWirelessGadget;
@@ -277,7 +277,7 @@ fn effective_night_mode(theme:&str,car_night:Option<bool>)->Option<bool>{
   _=>car_night,
  }
 }
-struct Receiver { socket:String, input_task:Option<tokio::task::JoinHandle<()>>, touch_generation:Option<u32>, handle:Option<catplay_carplay::carplay_rx::AirPlayReceiverHandleRef>, session_active:bool, mfi:Option<catplay_mfi::MfiDeficeRef>, gps:gps_iap2::GpsHub }
+struct Receiver { socket:String, input_task:Option<tokio::task::JoinHandle<()>>, touch_generation:Option<u32>, handle:Option<catplay_carplay::carplay_rx::AirPlayReceiverHandleRef>, session_active:bool, mfi:Option<catplay_mfi::MfiDeficeRef>, gps:gps_iap2::GpsHub, is_airplay:bool }
 fn configure_oem_icon(info:&mut InfoMessageResponse,options:&web::Options){
  use std::hash::{Hash,Hasher};
  let name=web::oem_name();
@@ -303,7 +303,11 @@ impl Drop for Receiver {fn drop(&mut self){
   ACTIVE_CARPLAY_SESSIONS.fetch_sub(1,std::sync::atomic::Ordering::SeqCst);
  }
  if let Some(task)=self.input_task.take(){task.abort();}
- if self.touch_generation.is_some_and(|g|TOUCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst)==g){
+ if self.is_airplay{
+  let _=std::fs::remove_file(format!("{}.airplay",self.socket));
+  if let Ok(s)=std::os::unix::net::UnixDatagram::unbound(){let _=s.set_nonblocking(true);let _=s.send_to(&[4],format!("{}.control",self.socket));}
+  eprintln!("AIRPLAY_SESSION_END");
+ }else if self.touch_generation.is_some_and(|g|TOUCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst)==g){
   let _=std::fs::remove_file(format!("{}.touch",self.socket));
   if let Ok(s)=std::os::unix::net::UnixDatagram::unbound(){let _=s.set_nonblocking(true);let _=s.send_to(&[4],format!("{}.control",self.socket));}
  }
@@ -312,6 +316,15 @@ impl Drop for Receiver {fn drop(&mut self){
 impl AirPlayReceiverSink for Receiver {
  fn init(&mut self,handle:catplay_carplay::carplay_rx::AirPlayReceiverHandleRef)->RtspResult<()>{
   self.handle=Some(handle.clone());
+  if self.is_airplay {
+   if !self.session_active{
+    self.session_active=true;
+    ACTIVE_CARPLAY_SESSIONS.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+   }
+   let _=std::fs::write(format!("{}.airplay",self.socket),"active\n");
+   eprintln!("AIRPLAY_SESSION_START");
+   return Ok(());
+  }
   let path=format!("{}.touch",self.socket);
   // A previous CarPlay session may have left its Unix socket pathname behind.
   let generation=TOUCH_GENERATION.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
@@ -452,30 +465,24 @@ impl AirPlayReceiverSink for Receiver {
   vec![]
  }
  async fn open_iap2(&mut self)->Option<catplay_iap2_client::CsmSessionBox>{
+  if self.is_airplay{return None;}
   Some(Box::new(gps_iap2::GpsIap2Session::new(self.mfi.clone(),web::bluetooth_name(),self.gps.clone(),self.socket.clone())))
  }
  async fn on_command_raw(&mut self,command:&catplay_carplay::msg::Command)->RtspResult<catplay_carplay::rtsp_frame::RtspResponse>{
-  if let catplay_carplay::msg::Command::RequestUI(request)=command {
-   if request.url.as_deref()!=Some("videoplayback:") {
-    let control=std::os::unix::net::UnixDatagram::unbound().map_err(|_|RtspError::Closed)?;
-    control.send_to(&[1],format!("{}.control",self.socket)).map_err(|_|RtspError::Closed)?;
-    log::info!("CAR_RETURN_REQUESTED url={:?}",request.url);
+  if !self.is_airplay {
+   if let catplay_carplay::msg::Command::RequestUI(request)=command {
+    if request.url.as_deref()!=Some("videoplayback:") {
+     let control=std::os::unix::net::UnixDatagram::unbound().map_err(|_|RtspError::Closed)?;
+     control.send_to(&[1],format!("{}.control",self.socket)).map_err(|_|RtspError::Closed)?;
+     log::info!("CAR_RETURN_REQUESTED url={:?}",request.url);
+    }
    }
   }
   Ok(catplay_carplay::rtsp_frame::RtspResponse::new(None,catplay_carplay::rtsp_frame::HttpStatus::Ok))
  }
  async fn on_info(&mut self,info:&mut InfoMessageResponse){
   let options=web::options();
-  info.manufacturer="CarFluxoid".into();info.model="CarFluxoid".into();
-  info.right_hand_drive=(options.sidebar==web::BarPosition::Right).into();
-  info.night_mode=effective_night_mode(&options.theme,car_night_mode(&self.socket)).map(Into::into);
-  if let Some(mac)=car_bluetooth_mac(&self.socket) {
-   if !info.bluetooth_ids.iter().any(|existing|existing.eq_ignore_ascii_case(&mac)) {
-    info.bluetooth_ids.push(mac);
-   }
-   eprintln!("CP_BT_IDS ids={:?}",info.bluetooth_ids);
-  }
-  configure_oem_icon(info,&options);
+  let (w,h)=display_size();
   // Prefer native 48 kHz stereo to avoid 44.1->48 kHz resampling on the Pi CPU.
   for fmt in &mut info.audio_formats {
    if let Some(out)=&mut fmt.audio_output_formats {
@@ -487,11 +494,31 @@ impl AirPlayReceiverSink for Receiver {
     }
    }
   }
+  if self.is_airplay {
+   let name=format!("{} AirPlay",web::bluetooth_name());
+   info.name=name.clone();
+   info.model="AppleTV3,2".into();
+   info.manufacturer="Apple Inc.".into();
+   let (physical_w,physical_h)=options.physical_size(w,h);
+   info.displays=vec![Display{width_pixels:w.into(),height_pixels:h.into(),width_physical:physical_w.into(),height_physical:physical_h.into(),max_fps:Some(30),features:catplay_carplay::msg::DisplayFeature::from_bits_retain(0x1E),uuid:"E5F7A68D-7B0F-4305-984B-974F677A150B".into(),..Default::default()}];
+   eprintln!("AIRPLAY_INFO name={name:?} display={w}x{h} fps=30");
+   return;
+  }
+  info.manufacturer="CarFluxoid".into();info.model="CarFluxoid".into();
+  info.right_hand_drive=(options.sidebar==web::BarPosition::Right).into();
+  info.night_mode=effective_night_mode(&options.theme,car_night_mode(&self.socket)).map(Into::into);
+  if let Some(mac)=car_bluetooth_mac(&self.socket) {
+   if !info.bluetooth_ids.iter().any(|existing|existing.eq_ignore_ascii_case(&mac)) {
+    info.bluetooth_ids.push(mac);
+   }
+   eprintln!("CP_BT_IDS ids={:?}",info.bluetooth_ids);
+  }
+  configure_oem_icon(info,&options);
   info.hid_devices.push(touch_device());
   info.hid_devices.push(media_device());
   info.hid_devices.push(telephony_device());
   info.hid_devices.push(knob_device());
-  let (w,h)=display_size();let (physical_w,physical_h)=options.physical_size(w,h);eprintln!("CP_DISPLAY negotiated {}x{} scale={} physical={}x{}mm",w,h,options.scale_percent,physical_w,physical_h);
+  let (physical_w,physical_h)=options.physical_size(w,h);eprintln!("CP_DISPLAY negotiated {}x{} scale={} physical={}x{}mm",w,h,options.scale_percent,physical_w,physical_h);
   let view_area=visible_area(&options,w,h);eprintln!("CP_VIEW_AREA margins={:?} safe={:?}",display_margins(),view_area.as_ref().and_then(|v|v.safe_area.as_ref()).map(|a|(a.origin_y_pixels,a.height_pixels)));
   use catplay_carplay::msg::DisplayFeature;
   let touch_features=if options.assist_buttons{DisplayFeature::LOWFI_TOUCH}else{DisplayFeature::HIGHFI_TOUCH};
@@ -502,7 +529,8 @@ impl AirPlayReceiverSink for Receiver {
  }
  async fn open_audio(&mut self,_:Duration,stream_type:catplay_carplay::msg::StreamType,_:catplay_carplay::msg::AudioType,_:catplay_carplay::msg::AudioFormat,_:catplay_carplay::audio::AudioStreamBasicDescription,_:bool)->RtspResult<catplay_carplay::audio::AudioPlayerBox<i16>>{
   let socket=std::os::unix::net::UnixDatagram::unbound().map_err(|_|RtspError::Closed)?;
-  let (out_rate,out_channels)=if stream_type==catplay_carplay::msg::StreamType::AltAudio
+  let (out_rate,out_channels)=if !self.is_airplay
+   && stream_type==catplay_carplay::msg::StreamType::AltAudio
    && socket.connect(format!("{}.guidance",self.socket)).is_ok()
   {
    let (r,c)=guidance_format(&self.socket);
@@ -567,6 +595,46 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
  eprintln!("CP_BOOT 2: runtime ready");
  runtime.block_on(run())
 }
+fn airplay_iface_mac(iface:&str)->Option<macaddr::MacAddr6>{
+ let raw=std::fs::read_to_string(format!("/sys/class/net/{iface}/address")).ok()?;
+ let mac:macaddr::MacAddr6=raw.trim().parse().ok()?;
+ let mut b=mac.into_array();
+ b[0]^=0x02;
+ b[5]=b[5].wrapping_add(1);
+ Some(macaddr::MacAddr6::from(b))
+}
+async fn start_airplay_server(
+ iface:&str,
+ airplay_name:&str,
+ homekit:catplay_hap::HomekitStorageRef,
+ shared:AirPlayServerShared,
+ socket:String,
+)->Result<AirPlayServer,String>{
+ let mac=airplay_iface_mac(iface).ok_or_else(||format!("{iface} MAC not ready"))?;
+ let mut server=AirPlayServer::new(
+  7000,
+  mac,
+  iface,
+  homekit,
+  None,
+  shared,
+  AirPlayReceiverProfile::AppleTV,
+  move||Receiver{
+   socket:socket.clone(),
+   input_task:None,
+   touch_generation:None,
+   handle:None,
+   session_active:false,
+   mfi:None,
+   gps:gps_iap2::GpsHub::new(),
+   is_airplay:true,
+  },
+ );
+ server.bind().await.map_err(|e|format!("bind :7000 failed: {e}"))?;
+ server.start_advertise_named("airplay.local.",airplay_name).map_err(|e|format!("bonjour advertise failed: {e}"))?;
+ eprintln!("AIRPLAY_READY name={airplay_name:?} port=7000 mac={mac}");
+ Ok(server)
+}
 async fn run()->Result<(),Box<dyn std::error::Error>>{
  eprintln!("CP_BOOT 3: initializing logger");
  env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(if std::env::var("AA_DIAGNOSTIC").as_deref()==Ok("1"){"info"}else{"warn"})).init();
@@ -599,6 +667,8 @@ async fn run()->Result<(),Box<dyn std::error::Error>>{
  let homekit_path=pairing.join("homekit_rx_db.bin");
  if let Err(e)=std::fs::read(&homekit_path){if e.kind()==std::io::ErrorKind::NotFound{if let Ok(bytes)=std::fs::read(state.join("homekit_rx_db.bin")){std::fs::write(&homekit_path,bytes)?;}}else{return Err(e.into());}}
  let homekit=HomekitStorageFile::file_without_metadata(homekit_path.to_str().ok_or("pairing path")?)?;
+ let airplay_homekit_path=pairing.join("homekit_airplay_db.bin");
+ let airplay_homekit=HomekitStorageFile::file_without_metadata(airplay_homekit_path.to_str().ok_or("airplay pairing path")?)?;
  let last_peer=pairing.join("last-iphone.txt");
  let password=firmware_wifi("password").or_else(||std::fs::read_to_string("/persist/config.txt").ok().and_then(|text|text.lines().filter_map(|line|line.split_once('=')).filter(|(key,_)|key.trim()=="wifi_password").map(|(_,value)|value.trim().trim_matches('"').to_string()).filter(|value|value.len()>=8&&value.len()<=63).last()).or_else(||std::env::var("AA_WIFI_PASSWORD").ok()));let socket=args[3].clone();
  eprintln!("CP_BOOT 7: starting wireless receiver");
@@ -612,11 +682,25 @@ async fn run()->Result<(),Box<dyn std::error::Error>>{
  let ssid=ssid_override.as_deref().unwrap_or(&args[2]);
  log::info!("CARFLUXOID_WIFI_SSID {}",ssid);
  let receiver_name=web::bluetooth_name();
+ let airplay_name=format!("{receiver_name} AirPlay");
  let session_mfi:catplay_mfi::MfiDeficeRef=mfi.clone();
- let mut receiver=CarPlayWirelessGadget::new(homekit,Some(mfi),AirPlayServerShared::new(),&receiver_name,"hci0","wlan0",ssid,password.as_deref(),password.is_some(),None,Some(last_peer.to_str().ok_or("peer cache path")?),move||Receiver{socket:socket.clone(),input_task:None,touch_generation:None,handle:None,session_active:false,mfi:Some(session_mfi.clone()),gps:gps_iap2::GpsHub::new()});
- log::info!("Standalone CarPlay receiver starting; no car-side CarPlay dependency");
+ let shared=AirPlayServerShared::new();
+ let carplay_socket=socket.clone();
+ let mut receiver=CarPlayWirelessGadget::new(homekit,Some(mfi),shared.clone(),&receiver_name,"hci0","wlan0",ssid,password.as_deref(),password.is_some(),None,Some(last_peer.to_str().ok_or("peer cache path")?),move||Receiver{socket:carplay_socket.clone(),input_task:None,touch_generation:None,handle:None,session_active:false,mfi:Some(session_mfi.clone()),gps:gps_iap2::GpsHub::new(),is_airplay:false});
+ let mut airplay_server:Option<AirPlayServer>=None;
+ let mut airplay_retry_at=Instant::now();
+ log::info!("Standalone CarPlay + AirPlay receiver starting; no car-side CarPlay dependency");
  let mut bt_quiet=false;
  loop {
+  if airplay_server.is_none()&&Instant::now()>=airplay_retry_at {
+   match start_airplay_server("wlan0",&airplay_name,airplay_homekit.clone(),shared.clone(),socket.clone()).await {
+    Ok(srv)=>{airplay_server=Some(srv);}
+    Err(err)=>{
+     log::debug!("AIRPLAY_START_DEFERRED: {err}");
+     airplay_retry_at=Instant::now()+Duration::from_secs(2);
+    }
+   }
+  }
   let want_quiet=ACTIVE_CARPLAY_SESSIONS.load(std::sync::atomic::Ordering::SeqCst)>0;
   if want_quiet!=bt_quiet {
    let discoverable=!want_quiet;
@@ -636,6 +720,7 @@ async fn run()->Result<(),Box<dyn std::error::Error>>{
   let _=receiver.reconcile().await;
   tokio::select!{_=tokio::signal::ctrl_c()=>break,_=receiver.sleep()=>{},_=tokio::time::sleep(Duration::from_millis(100))=>{}}
  }
+ if let Some(mut srv)=airplay_server.take(){srv.shutdown().await;}
  if bt_quiet {
   let _=pairing.set_pairable("hci0",true).await;
   let _=pairing.set_discoverable("hci0",true).await;
@@ -649,8 +734,8 @@ async fn run()->Result<(),Box<dyn std::error::Error>>{
   let control=std::os::unix::net::UnixDatagram::bind(&control_path).unwrap();control.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
   let _socket=std::os::unix::net::UnixDatagram::bind(&path).unwrap();
   TOUCH_GENERATION.store(42,std::sync::atomic::Ordering::SeqCst);
-  let old=Receiver{socket:base.clone(),input_task:None,touch_generation:Some(41),handle:None,session_active:false,mfi:None,gps:gps_iap2::GpsHub::new()};
-  let new=Receiver{socket:base.clone(),input_task:None,touch_generation:Some(42),handle:None,session_active:false,mfi:None,gps:gps_iap2::GpsHub::new()};
+  let old=Receiver{socket:base.clone(),input_task:None,touch_generation:Some(41),handle:None,session_active:false,mfi:None,gps:gps_iap2::GpsHub::new(),is_airplay:false};
+  let new=Receiver{socket:base.clone(),input_task:None,touch_generation:Some(42),handle:None,session_active:false,mfi:None,gps:gps_iap2::GpsHub::new(),is_airplay:false};
   drop(old);assert!(std::os::unix::net::UnixDatagram::bind(&path).is_err());
   drop(new);let mut event=[0u8;1];control.recv(&mut event).unwrap();assert_eq!(event,[4]);
   let _replacement=std::os::unix::net::UnixDatagram::bind(&path).unwrap();let _=std::fs::remove_file(path);let _=std::fs::remove_file(control_path);

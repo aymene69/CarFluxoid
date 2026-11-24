@@ -154,15 +154,16 @@ fn diag_json()->String{
   if p.len()>=2 {format!("{} Hz {}",p[0],if p[1]=="1"{"mono"}else{"stéréo"})} else {s}
  }).unwrap_or_else(||"inactif".into());
  let carplay_active=bridge.join("video.sock.touch").exists();
+ let airplay_active=bridge.join("video.sock.airplay").exists();
  let usb_online=read_trimmed("/sys/module/aa_bulk/parameters/usb_online").unwrap_or_else(||"—".into());
  let accessory=read_trimmed("/sys/module/aa_bulk/parameters/accessory_active").unwrap_or_else(||"—".into());
  let rx_bytes=read_trimmed("/sys/module/aa_bulk/parameters/rx_bytes").unwrap_or_else(||"0".into());
  let tx_bytes=read_trimmed("/sys/module/aa_bulk/parameters/tx_bytes").unwrap_or_else(||"0".into());
  format!(
-  r#"{{"version":"{}","build":"{}","slot":"{}","temp_c":"{}","throttled":"{}","uptime_s":{},"display":"{}","night_mode":"{}","bt_mac":"{}","gps":"{}","gps_carplay":"{}","guidance":"{}","carplay_active":{},"usb_online":"{}","accessory_active":"{}","rx_bytes":"{}","tx_bytes":"{}","services":{{"aa":"{}","radio":"{}","dashboard":"{}","diag":"{}"}}}}"#,
+  r#"{{"version":"{}","build":"{}","slot":"{}","temp_c":"{}","throttled":"{}","uptime_s":{},"display":"{}","night_mode":"{}","bt_mac":"{}","gps":"{}","gps_carplay":"{}","guidance":"{}","carplay_active":{},"airplay_active":{},"usb_online":"{}","accessory_active":"{}","rx_bytes":"{}","tx_bytes":"{}","services":{{"aa":"{}","radio":"{}","dashboard":"{}","diag":"{}"}}}}"#,
   json_escape(APP_VERSION),json_escape(APP_BUILD),json_escape(os_slot()),
   json_escape(&temp_c),json_escape(&throttled),uptime_s,json_escape(&display),night_mode,
-  json_escape(&bt_mac),json_escape(&gps),json_escape(&gps_carplay),json_escape(&guidance),carplay_active,
+  json_escape(&bt_mac),json_escape(&gps),json_escape(&gps_carplay),json_escape(&guidance),carplay_active,airplay_active,
   json_escape(&usb_online),json_escape(&accessory),json_escape(&rx_bytes),json_escape(&tx_bytes),
   json_escape(&service_state("carfluxoid-aa")),json_escape(&service_state("carfluxoid-radio")),
   json_escape(&service_state("carfluxoid-dashboard")),json_escape(&service_state("carfluxoid-car-diag")),

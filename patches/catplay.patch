@@ -1,5 +1,377 @@
+diff --git a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
+index 97a52b4..caf7cd9 100644
+--- a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
++++ b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
+@@ -2,7 +2,7 @@ use async_trait::async_trait;
+ use catplay_hap::{HomekitStorage, HomekitStorageRef};
+ 
+ use catplay_iap2_client::{
+-    CsmRemote,
++    CsmClient, CsmRemote, CsmSessionStatus,
+     tokio::{AsyncClient, AsyncClientDrain},
+ };
+ use catplay_mfi::MfiDevice;
+@@ -142,10 +142,10 @@ struct Streams {
+ 
+     #[sleep]
+     #[shutdown(take)]
+-    #[reconcile]
+     iap2: Option<AsyncClient>,
+     #[sleep]
+     iap2_drain: Option<AsyncClientDrain>,
++    iap2_started: Option<Instant>,
+ 
+     handle: Option<AirPlayReceiverHandleRef>,
+ }
+@@ -201,7 +201,7 @@ impl AirPlayReceiver {
+     const ALLOW_PAIR_SETUP_DOWNGRADE: bool = true;
+     const TCP_REVERSE_CONN_TIMEOUT: Duration = Duration::from_millis(2000);
+     const CARPLAY_FORCE_HEVC: bool = false;
+-    const APPLETV_FORCE_HEVC: bool = true;
++    const APPLETV_FORCE_HEVC: bool = false;
+ 
+     pub fn new(
+         iface: &str,
+@@ -412,7 +412,7 @@ impl AirPlayReceiver {
+             flags: AirPlayStatus::AUDIO,
+             deviceid: match profile {
+                 AirPlayReceiverProfile::CarPlay => format!("{}", device_id),
+-                AirPlayReceiverProfile::AppleTV => format!("{}_atv", device_id),
++                AirPlayReceiverProfile::AppleTV => format!("{}", device_id),
+             },
+ 
+             vv: match profile {
+@@ -452,7 +452,11 @@ impl AirPlayReceiver {
+         self.state.change(AirPlayReceiverState::PostRecord);
+         // Session has formally started
+         info!("Session starting as RECORD was requested");
+-        self.sink.on_record().await
++        self.sink.on_record().await?;
++        if self.features.contains(AirPlayFeature::CAR) && self.wireless {
++            self.init_iap2().await;
++        }
++        Ok(())
+     }
+ 
+     async fn respond_teardown(&mut self, req: &RtspRequest, _resp: &mut RtspResponse) -> RtspResult<()> {
+@@ -579,29 +583,57 @@ impl AirPlayReceiver {
+         resp.set_plist(streams_resp)
+     }
+ 
+-    async fn init_iap2(&mut self, _handle: AirPlayReceiverHandleRef) {
+-        let Some(_sink) = self.sink.open_iap2().await else {
++    async fn init_iap2(&mut self) {
++        if self.streams.iap2.is_some() || self.streams.iap2_started.is_some() {
+             return;
+-        };
+-
++        }
+         if !self.wireless {
+             return;
+         }
+ 
+-        let (client, drain) = AsyncClient::new(false, CsmRemote::airplay(), _sink);
++        self.streams.iap2_started.replace(Instant::now());
++        let Some(sink) = self.sink.open_iap2().await else {
++            return;
++        };
++
++        let (client, drain) = AsyncClient::new(false, CsmRemote::airplay(), sink);
+         self.streams.iap2_drain.replace(drain);
+         self.streams.iap2.replace(client);
+     }
+ 
+     async fn flush_iap2(&mut self) -> RtspResult<()> {
++        let mut drop_iap2 = false;
++        if let Some(iap2) = self.streams.iap2.as_mut() {
++            if let Err(err) = iap2.reconcile().await {
++                warn!("iAP2 over AirPlay stopped (continuing CarPlay): {err:?}");
++                drop_iap2 = true;
++            } else if iap2.status() == CsmSessionStatus::Detecting
++                && self
++                    .streams
++                    .iap2_started
++                    .is_some_and(|started| started.elapsed() >= Duration::from_secs(15))
++            {
++                warn!("iAP2 over AirPlay timed out in Detecting state; disabling iAP2");
++                drop_iap2 = true;
++            }
++        }
++        if drop_iap2 {
++            if let Some(mut iap2) = self.streams.iap2.take() {
++                iap2.shutdown().await;
++            }
++            self.streams.iap2_drain = None;
++            return Ok(());
++        }
++
+         if let Some(handle) = self.streams.handle.as_mut()
+             && let Some(drain) = self.streams.iap2_drain.as_mut()
+-            && let Some(packet) = drain.take()
+         {
+-            debug!("Forwarding iAP2 packet");
+-            let fut = handle.send_command(Command::IApSendMessage(CommandIApSendMessage {
+-                data: packet.into_inner().into(),
+-            }))?;
++            while let Some(packet) = drain.take() {
++                debug!("Forwarding iAP2 packet");
++                handle.send_command_and_forget(Command::IApSendMessage(CommandIApSendMessage {
++                    data: packet.into_inner().into(),
++                }));
++            }
+         }
+ 
+         Ok(())
+@@ -890,7 +922,16 @@ impl AirPlayReceiver {
+         self.sink.init(handle.clone())?;
+         self.sink_had_init = true;
+ 
+-        let lock = self.shared.lock(handle.clone());
++        let mut lock = self.shared.lock(handle.clone());
++        if lock.is_none() && self.profile == AirPlayReceiverProfile::AppleTV {
++            if let Some(existing) = self.shared.borrow() {
++                warn!("Preempting active CarPlay session for incoming AirPlay mirroring");
++                let mut rx = self.shared.subscribe();
++                existing.close(RtspError::UserClosing);
++                let _ = tokio::time::timeout(Duration::from_millis(1500), rx.wait_for(|v| v.is_none())).await;
++            }
++            lock = self.shared.lock(handle.clone());
++        }
+         if lock.is_none() {
+             warn!("Rejected incoming AirPlay connection, because session is already active!");
+             return Err(RtspError::Code(HttpStatus::NotEnoughBandwidth));
+@@ -900,10 +941,6 @@ impl AirPlayReceiver {
+ 
+         self.sink.on_initial_setup().await?;
+ 
+-        if self.features.contains(AirPlayFeature::CAR) && self.wireless {
+-            self.init_iap2(handle.clone()).await;
+-        }
+-
+         let (keep_alive_socket, keep_alive_bind) = UdpHelper::bind(bind_ip, KeepAliveServer::new())?;
+ 
+         // Never enable a feature that the device did not offer
+@@ -995,6 +1032,9 @@ impl AirPlayReceiver {
+                 Ok(RtspResponse::new(None, HttpStatus::Ok))
+             }
+             Command::IApSendMessage(cmd) => {
++                if self.streams.iap2.is_none() && self.features.contains(AirPlayFeature::CAR) && self.wireless {
++                    self.init_iap2().await;
++                }
+                 if let Some(iap2) = self.streams.iap2.as_mut() {
+                     iap2.read_frame_buf(&cmd.data);
+                 } else {
+diff --git a/carplay/catplay_carplay/src/carplay_rx/sink/server.rs b/carplay/catplay_carplay/src/carplay_rx/sink/server.rs
+index ffe05c1..41e9903 100644
+--- a/carplay/catplay_carplay/src/carplay_rx/sink/server.rs
++++ b/carplay/catplay_carplay/src/carplay_rx/sink/server.rs
+@@ -86,14 +86,18 @@ impl AirPlayServer {
+     }
+ 
+     pub fn start_advertise(&mut self) -> io::Result<()> {
++        self.start_advertise_named("carplay.local.", "carplay")
++    }
++
++    pub fn start_advertise_named(&mut self, hostname: &str, instance_name: &str) -> io::Result<()> {
+         let bonjour = Bonjour::with_iface(&self.iface, BonjourType::Ipv6AndIpv4)?;
+         let entry = AirPlayReceiver::bonjour(self.profile, self.homekit.clone(), self.mac_addr);
+-        let handle = bonjour.register::<AirPlayBonjourEntry>(entry, "carplay.local.", "carplay", self.port, &[])?;
++        let handle = bonjour.register::<AirPlayBonjourEntry>(entry, hostname, instance_name, self.port, &[])?;
+ 
+         self.bonjour_entry.replace(handle);
+         self.bonjour.replace(bonjour);
+ 
+-        debug!("AirPlayServer started advertising");
++        debug!("AirPlayServer started advertising {instance_name} on {hostname}:{}", self.port);
+         Ok(())
+     }
+ 
+diff --git a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs b/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
+index bd489fd..c8e8390 100644
+--- a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
++++ b/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
+@@ -5,15 +5,18 @@ use std::{
+ 
+ use catplay_tokio::{UdpSession, UdpSocketPeer};
+ use catplay_util::{Deadline, EventSleeper};
+-use log::debug;
++use log::{debug, warn};
+ 
+ use crate::{
+     audio::{AudioPlayerBox, AudioPlayerEvent, codec::AudioDecoder},
+     cipher::AirPlayStreamEncryption,
+-    rtp::{AsRtpPacket, RtpAesCbcDecoder, RtpChaChaDecoder, RtpCipher, play::RtpPlayer},
++    rtp::{AsRtpPacket, RtpAesCbcDecoder, RtpChaChaDecoder, RtpCipher, RtpPacket, play::RtpPlayer},
+     rtsp_frame::{RtspError, RtspResult},
+ };
+ 
++const REORDER_WAIT: Duration = Duration::from_millis(25);
++const REORDER_MAX_PACKETS: usize = 16;
++
+ #[derive(EventSleeper)]
+ pub struct RtpSession<C: AudioDecoder> {
+     codec: RtpCipher,
+@@ -25,6 +28,12 @@ pub struct RtpSession<C: AudioDecoder> {
+     stopped: bool,
+     #[sleep]
+     start_deadline: Deadline,
++    #[sleep]
++    reorder_deadline: Deadline,
++    next_sequence: Option<u16>,
++    pending: Vec<(Instant, RtpPacket)>,
++    reordered: u64,
++    expired: u64,
+ }
+ 
+ impl<C: AudioDecoder> RtpSession<C> {
+@@ -71,6 +80,11 @@ impl<C: AudioDecoder> RtpSession<C> {
+             anchored: false,
+             stopped: false,
+             start_deadline: Deadline::Never,
++            reorder_deadline: Deadline::Never,
++            next_sequence: None,
++            pending: Vec::new(),
++            reordered: 0,
++            expired: 0,
+         };
+ 
+         me.start_playback_if_ready();
+@@ -103,6 +117,8 @@ impl<C: AudioDecoder> RtpSession<C> {
+         if !self.stopped {
+             self.stopped = true;
+             self.start_deadline = Deadline::Never;
++            self.reorder_deadline = Deadline::Never;
++            self.pending.clear();
+             if let Some(sink) = self.sink.as_mut() {
+                 sink.on_event(AudioPlayerEvent::Stop);
+             }
+@@ -122,21 +138,64 @@ impl<C: AudioDecoder> RtpSession<C> {
+         // TODO: detect player `read_head` stall, rewind and restart
+         // TODO: timeout when there are no incoming packets for too long
+ 
++        self.drain_reorder(Instant::now());
+         let packet = self.codec.decode(data)?;
+         debug!("New RTP packet: {:?}", packet.header());
++        let now = Instant::now();
++        let sequence = packet.header().sequence_number;
++        let expected = self.next_sequence.unwrap_or(sequence);
++        match sequence.wrapping_sub(expected) as i16 {
++            0 => {
++                if !self.pending.is_empty() {
++                    self.reordered += 1;
++                    if self.reordered == 1 || self.reordered % 16 == 0 {
++                        warn!("AUDIO_RTP_REORDER recovered={} expired={}", self.reordered, self.expired);
++                    }
++                }
++                self.deliver(&packet);
++            }
++            1.. => {
++                if self.pending.iter().any(|(_, p)| p.header().sequence_number == sequence) {
++                    return Ok(());
++                }
++                self.pending.push((now, packet.to_owned_packet()));
++            }
++            _ => return Ok(()),
++        }
++        self.drain_reorder(now);
++        self.start_playback_if_ready();
++        Ok(())
++    }
+ 
++    fn deliver(&mut self, packet: &dyn AsRtpPacket) {
++        self.next_sequence = Some(packet.header().sequence_number.wrapping_add(1));
+         if let Some(player) = self.player.as_mut() {
+             let written = player.total_written();
+-            player.push(&packet);
++            player.push(packet);
+             if player.total_written() != written {
+                 if let Some(sink) = self.sink.as_mut() {
+                     sink.on_event(AudioPlayerEvent::AddedDataToRing);
+                 }
+             }
+         }
+-        self.start_playback_if_ready();
++    }
+ 
+-        Ok(())
++    fn drain_reorder(&mut self, now: Instant) {
++        while !self.pending.is_empty() {
++            let expected = self.next_sequence.expect("first RTP packet is delivered immediately");
++            let deadline = self.pending.iter().map(|(at, _)| *at).min().unwrap() + REORDER_WAIT;
++            let (index, distance) = self.pending.iter().enumerate()
++                .map(|(i, (_, p))| (i, p.header().sequence_number.wrapping_sub(expected)))
++                .min_by_key(|&(_, distance)| distance).unwrap();
++            if distance != 0 && now < deadline && self.pending.len() < REORDER_MAX_PACKETS {
++                self.reorder_deadline = Deadline::new(deadline);
++                return;
++            }
++            self.expired += u64::from(distance);
++            let (_, packet) = self.pending.swap_remove(index);
++            self.deliver(&packet);
++        }
++        self.reorder_deadline = Deadline::Never;
+     }
+ }
+ 
+@@ -153,6 +212,7 @@ impl<C: AudioDecoder> UdpSession for RtpSession<C> {
+     }
+ 
+     fn reconcile(&mut self, _peer: Option<&dyn UdpSocketPeer<Self>>) -> RtspResult<()> {
++        self.drain_reorder(Instant::now());
+         self.start_playback_if_ready();
+         Ok(())
+     }
+@@ -220,6 +280,48 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn recovers_out_of_order_audio_and_releases_missing_packets_at_deadline() {
++        use crate::audio::RingSegment;
++
++        fn packet(sequence: u16, timestamp: u32, sample: u8) -> Vec<u8> {
++            let mut bytes = vec![0x80, 0x60];
++            bytes.extend(sequence.to_be_bytes());
++            bytes.extend(timestamp.to_be_bytes());
++            bytes.extend([0, 0, 0, 0, sample]);
++            bytes
++        }
++
++        let playback = Arc::new(Mutex::new(Playback::default()));
++        let mut session = RtpSession::new_with_cipher(
++            RtpCipher::None,
++            Duration::from_millis(100),
++            Decoder,
++            Box::new(Player(playback.clone())),
++        ).unwrap();
++        session.on_recv(&mut packet(u16::MAX, 0, 1)).unwrap();
++        session.on_recv(&mut packet(1, 2, 3)).unwrap();
++        assert_eq!(session.next_sequence, Some(0));
++        session.on_recv(&mut packet(0, 1, 2)).unwrap();
++        assert_eq!(session.reordered, 1);
++        assert_eq!(session.expired, 0);
++
++        session.on_recv(&mut packet(3, 4, 5)).unwrap();
++        let deadline = session.pending[0].0 + REORDER_WAIT;
++        session.drain_reorder(deadline - Duration::from_millis(1));
++        assert_eq!(session.next_sequence, Some(2));
++        session.drain_reorder(deadline);
++        assert_eq!(session.expired, 1);
++        session.on_recv(&mut packet(2, 3, 4)).unwrap();
++        assert_eq!(session.next_sequence, Some(4));
++        let playback = playback.lock().unwrap();
++        let ring = playback.ring.as_ref().unwrap();
++        assert_eq!(
++            ring.iter_segments(5, false).collect::<Vec<_>>(),
++            [RingSegment::Data(&[1, 2, 3]), RingSegment::Gap(1), RingSegment::Data(&[5])],
++        );
++    }
++
+     #[tokio::test]
+     async fn latency_wakes_player_without_another_datagram() {
+         let playback = Arc::new(Mutex::new(Playback::default()));
 diff --git a/catplay_carplay_rx_gadget/src/iap2_session.rs b/catplay_carplay_rx_gadget/src/iap2_session.rs
-index ac1d9de..6a5baa9 100644
+index ac1d9de..aaaf5e7 100644
 --- a/catplay_carplay_rx_gadget/src/iap2_session.rs
 +++ b/catplay_carplay_rx_gadget/src/iap2_session.rs
 @@ -306,6 +306,7 @@ impl CarPlayServerSession {
@@ -10,7 +382,7 @@ index ac1d9de..6a5baa9 100644
                      CallStateUpdate::PACKET_ID,
                      ListUpdate::PACKET_ID,
                  ][..],
-@@ -446,6 +447,18 @@ impl CsmSession for CarPlayServerSession {
+@@ -446,11 +447,24 @@ impl CsmSession for CarPlayServerSession {
          //     })?;
          // }
  
@@ -29,8 +401,14 @@ index ac1d9de..6a5baa9 100644
          if let Some(np) = packet.cast::<NowPlayingUpdate>() {
              self.on_now_playing(np.clone());
          }
+ 
+         if let Some(start_location) = packet.cast::<StartLocationInformation>() {
++            warn!("BT_IAP2_START_LOCATION received on Bluetooth iAP2 session");
+             self.gps_sub = true;
+             self.publish(CarPlayServerSessionEventTx::StartLocationInformation(start_location.clone()));
+         }
 diff --git a/catplay_carplay_rx_gadget/src/server_wireless.rs b/catplay_carplay_rx_gadget/src/server_wireless.rs
-index fce10a4..4624000 100644
+index fce10a4..34fa664 100644
 --- a/catplay_carplay_rx_gadget/src/server_wireless.rs
 +++ b/catplay_carplay_rx_gadget/src/server_wireless.rs
 @@ -331,6 +331,9 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayWirelessGadget<T> {
@@ -43,6 +421,33 @@ index fce10a4..4624000 100644
                      display_name: self.name.clone(),
                      ncm_iface: None,
                      bt_mac: Some(*mac),
+@@ -339,7 +342,7 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayWirelessGadget<T> {
+                     wifi_is_wpa: self.wpa,
+                     wifi_channel: self.channel,
+                     is_usb_transport: false,
+-                    has_gps: true,
++                    has_gps: false,
+                     wants_now_playing: false,
+                     ..CarPlaySessionIdentity::default()
+                 };
+diff --git a/core/catplay_hap/build.rs b/core/catplay_hap/build.rs
+index cbb8573..5f84902 100644
+--- a/core/catplay_hap/build.rs
++++ b/core/catplay_hap/build.rs
+@@ -124,6 +124,13 @@ fn write_openssl_asm_base_header(out_dir: &Path) {
+         "#ifndef OPENSSL_HEADER_ASM_BASE_H\n\
+          #define OPENSSL_HEADER_ASM_BASE_H\n\
+          #define _CET_ENDBR\n\
++         #if defined(OPENSSL_AARCH64)\n\
++         #if defined(__ARM_FEATURE_PAC_DEFAULT) || defined(__ARM_FEATURE_BTI_DEFAULT)\n\
++         #error ARM branch protection requires the full upstream asm header\n\
++         #endif\n\
++         #define AARCH64_SIGN_LINK_REGISTER\n\
++         #define AARCH64_VALIDATE_LINK_REGISTER\n\
++         #endif\n\
+          #endif\n",
+     )
+     .expect("failed to write OUT_DIR/openssl/asm_base.h");
 diff --git a/core/catplay_hap/src/storage/storage_file.rs b/core/catplay_hap/src/storage/storage_file.rs
 index f363433..96a8737 100644
 --- a/core/catplay_hap/src/storage/storage_file.rs
@@ -163,332 +568,3 @@ index 0000000..abfff73
 +    assert_eq!(test.client.next_payload(), Some((SessionType::ExternalAccessory, vec![4, 5, 6])));
 +    assert!(!test.client.ea().has_tx_pending());
 +}
-diff --git a/core/catplay_hap/build.rs b/core/catplay_hap/build.rs
-index cbb8573..5f84902 100644
---- a/core/catplay_hap/build.rs
-+++ b/core/catplay_hap/build.rs
-@@ -124,6 +124,13 @@ fn write_openssl_asm_base_header(out_dir: &Path) {
-         "#ifndef OPENSSL_HEADER_ASM_BASE_H\n\
-          #define OPENSSL_HEADER_ASM_BASE_H\n\
-          #define _CET_ENDBR\n\
-+         #if defined(OPENSSL_AARCH64)\n\
-+         #if defined(__ARM_FEATURE_PAC_DEFAULT) || defined(__ARM_FEATURE_BTI_DEFAULT)\n\
-+         #error ARM branch protection requires the full upstream asm header\n\
-+         #endif\n\
-+         #define AARCH64_SIGN_LINK_REGISTER\n\
-+         #define AARCH64_VALIDATE_LINK_REGISTER\n\
-+         #endif\n\
-          #endif\n",
-     )
-     .expect("failed to write OUT_DIR/openssl/asm_base.h");
-diff --git a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs b/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
-index bd489fd..446c2d0 100644
---- a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
-+++ b/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
-@@ -5,15 +5,18 @@ use std::{
-
- use catplay_tokio::{UdpSession, UdpSocketPeer};
- use catplay_util::{Deadline, EventSleeper};
--use log::debug;
-+use log::{debug, warn};
-
- use crate::{
-     audio::{AudioPlayerBox, AudioPlayerEvent, codec::AudioDecoder},
-     cipher::AirPlayStreamEncryption,
--    rtp::{AsRtpPacket, RtpAesCbcDecoder, RtpChaChaDecoder, RtpCipher, play::RtpPlayer},
-+    rtp::{AsRtpPacket, RtpAesCbcDecoder, RtpChaChaDecoder, RtpCipher, RtpPacket, play::RtpPlayer},
-     rtsp_frame::{RtspError, RtspResult},
- };
-
-+const REORDER_WAIT: Duration = Duration::from_millis(25);
-+const REORDER_MAX_PACKETS: usize = 16;
-+
- #[derive(EventSleeper)]
- pub struct RtpSession<C: AudioDecoder> {
-     codec: RtpCipher,
-@@ -25,6 +28,12 @@ pub struct RtpSession<C: AudioDecoder> {
-     stopped: bool,
-     #[sleep]
-     start_deadline: Deadline,
-+    #[sleep]
-+    reorder_deadline: Deadline,
-+    next_sequence: Option<u16>,
-+    pending: Vec<(Instant, RtpPacket)>,
-+    reordered: u64,
-+    expired: u64,
- }
-
- impl<C: AudioDecoder> RtpSession<C> {
-@@ -71,6 +80,11 @@ impl<C: AudioDecoder> RtpSession<C> {
-             anchored: false,
-             stopped: false,
-             start_deadline: Deadline::Never,
-+            reorder_deadline: Deadline::Never,
-+            next_sequence: None,
-+            pending: Vec::new(),
-+            reordered: 0,
-+            expired: 0,
-         };
-
-         me.start_playback_if_ready();
-@@ -103,6 +117,8 @@ impl<C: AudioDecoder> RtpSession<C> {
-         if !self.stopped {
-             self.stopped = true;
-             self.start_deadline = Deadline::Never;
-+            self.reorder_deadline = Deadline::Never;
-+            self.pending.clear();
-             if let Some(sink) = self.sink.as_mut() {
-                 sink.on_event(AudioPlayerEvent::Stop);
-             }
-@@ -122,21 +138,64 @@ impl<C: AudioDecoder> RtpSession<C> {
-         // TODO: detect player `read_head` stall, rewind and restart
-         // TODO: timeout when there are no incoming packets for too long
-
-+        self.drain_reorder(Instant::now());
-         let packet = self.codec.decode(data)?;
-         debug!("New RTP packet: {:?}", packet.header());
-+        let now = Instant::now();
-+        let sequence = packet.header().sequence_number;
-+        let expected = self.next_sequence.unwrap_or(sequence);
-+        match sequence.wrapping_sub(expected) as i16 {
-+            0 => {
-+                if !self.pending.is_empty() {
-+                    self.reordered += 1;
-+                    if self.reordered == 1 || self.reordered % 16 == 0 {
-+                        warn!("AUDIO_RTP_REORDER recovered={} expired={}", self.reordered, self.expired);
-+                    }
-+                }
-+                self.deliver(&packet);
-+            }
-+            1.. => {
-+                if self.pending.iter().any(|(_, p)| p.header().sequence_number == sequence) {
-+                    return Ok(());
-+                }
-+                self.pending.push((now, packet.to_owned_packet()));
-+            }
-+            _ => return Ok(()),
-+        }
-+        self.drain_reorder(now);
-+        self.start_playback_if_ready();
-+        Ok(())
-+    }
-
-+    fn deliver(&mut self, packet: &dyn AsRtpPacket) {
-+        self.next_sequence = Some(packet.header().sequence_number.wrapping_add(1));
-         if let Some(player) = self.player.as_mut() {
-             let written = player.total_written();
--            player.push(&packet);
-+            player.push(packet);
-             if player.total_written() != written {
-                 if let Some(sink) = self.sink.as_mut() {
-                     sink.on_event(AudioPlayerEvent::AddedDataToRing);
-                 }
-             }
-         }
--        self.start_playback_if_ready();
-+    }
-
--        Ok(())
-+    fn drain_reorder(&mut self, now: Instant) {
-+        while !self.pending.is_empty() {
-+            let expected = self.next_sequence.expect("first RTP packet is delivered immediately");
-+            let deadline = self.pending.iter().map(|(at, _)| *at).min().unwrap() + REORDER_WAIT;
-+            let (index, distance) = self.pending.iter().enumerate()
-+                .map(|(i, (_, p))| (i, p.header().sequence_number.wrapping_sub(expected)))
-+                .min_by_key(|&(_, distance)| distance).unwrap();
-+            if distance != 0 && now < deadline && self.pending.len() < REORDER_MAX_PACKETS {
-+                self.reorder_deadline = Deadline::new(deadline);
-+                return;
-+            }
-+            self.expired += u64::from(distance);
-+            let (_, packet) = self.pending.swap_remove(index);
-+            self.deliver(&packet);
-+        }
-+        self.reorder_deadline = Deadline::Never;
-     }
- }
-
-@@ -153,6 +212,7 @@ impl<C: AudioDecoder> UdpSession for RtpSession<C> {
-     }
-
-     fn reconcile(&mut self, _peer: Option<&dyn UdpSocketPeer<Self>>) -> RtspResult<()> {
-+        self.drain_reorder(Instant::now());
-         self.start_playback_if_ready();
-         Ok(())
-     }
-@@ -220,6 +280,48 @@ mod tests {
-         }
-     }
-
-+    #[test]
-+    fn recovers_out_of_order_audio_and_releases_missing_packets_at_deadline() {
-+        use crate::audio::RingSegment;
-+
-+        fn packet(sequence: u16, timestamp: u32, sample: u8) -> Vec<u8> {
-+            let mut bytes = vec![0x80, 0x60];
-+            bytes.extend(sequence.to_be_bytes());
-+            bytes.extend(timestamp.to_be_bytes());
-+            bytes.extend([0, 0, 0, 0, sample]);
-+            bytes
-+        }
-+
-+        let playback = Arc::new(Mutex::new(Playback::default()));
-+        let mut session = RtpSession::new_with_cipher(
-+            RtpCipher::None,
-+            Duration::from_millis(100),
-+            Decoder,
-+            Box::new(Player(playback.clone())),
-+        ).unwrap();
-+        session.on_recv(&mut packet(u16::MAX, 0, 1)).unwrap();
-+        session.on_recv(&mut packet(1, 2, 3)).unwrap();
-+        assert_eq!(session.next_sequence, Some(0));
-+        session.on_recv(&mut packet(0, 1, 2)).unwrap();
-+        assert_eq!(session.reordered, 1);
-+        assert_eq!(session.expired, 0);
-+
-+        session.on_recv(&mut packet(3, 4, 5)).unwrap();
-+        let deadline = session.pending[0].0 + REORDER_WAIT;
-+        session.drain_reorder(deadline - Duration::from_millis(1));
-+        assert_eq!(session.next_sequence, Some(2));
-+        session.drain_reorder(deadline);
-+        assert_eq!(session.expired, 1);
-+        session.on_recv(&mut packet(2, 3, 4)).unwrap();
-+        assert_eq!(session.next_sequence, Some(4));
-+        let playback = playback.lock().unwrap();
-+        let ring = playback.ring.as_ref().unwrap();
-+        assert_eq!(
-+            ring.iter_segments(5, false).collect::<Vec<_>>(),
-+            [RingSegment::Data(&[1, 2, 3]), RingSegment::Gap(1), RingSegment::Data(&[5])],
-+        );
-+    }
-+
-     #[tokio::test]
-     async fn latency_wakes_player_without_another_datagram() {
-         let playback = Arc::new(Mutex::new(Playback::default()));
-diff --git a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
-index 97a52b4..52374fe 100644
---- a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
-+++ b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
-@@ -2,7 +2,7 @@ use async_trait::async_trait;
- use catplay_hap::{HomekitStorage, HomekitStorageRef};
- 
- use catplay_iap2_client::{
--    CsmRemote,
-+    CsmClient, CsmRemote, CsmSessionStatus,
-     tokio::{AsyncClient, AsyncClientDrain},
- };
- use catplay_mfi::MfiDevice;
-@@ -142,10 +142,10 @@ struct Streams {
- 
-     #[sleep]
-     #[shutdown(take)]
--    #[reconcile]
-     iap2: Option<AsyncClient>,
-     #[sleep]
-     iap2_drain: Option<AsyncClientDrain>,
-+    iap2_started: Option<Instant>,
- 
-     handle: Option<AirPlayReceiverHandleRef>,
- }
-@@ -452,7 +452,11 @@ impl AirPlayReceiver {
-         self.state.change(AirPlayReceiverState::PostRecord);
-         // Session has formally started
-         info!("Session starting as RECORD was requested");
--        self.sink.on_record().await
-+        self.sink.on_record().await?;
-+        if self.features.contains(AirPlayFeature::CAR) && self.wireless {
-+            self.init_iap2().await;
-+        }
-+        Ok(())
-     }
- 
-     async fn respond_teardown(&mut self, req: &RtspRequest, _resp: &mut RtspResponse) -> RtspResult<()> {
-@@ -579,29 +583,57 @@ impl AirPlayReceiver {
-         resp.set_plist(streams_resp)
-     }
- 
--    async fn init_iap2(&mut self, _handle: AirPlayReceiverHandleRef) {
--        let Some(_sink) = self.sink.open_iap2().await else {
-+    async fn init_iap2(&mut self) {
-+        if self.streams.iap2.is_some() || self.streams.iap2_started.is_some() {
-             return;
--        };
--
-+        }
-         if !self.wireless {
-             return;
-         }
- 
--        let (client, drain) = AsyncClient::new(false, CsmRemote::airplay(), _sink);
-+        self.streams.iap2_started.replace(Instant::now());
-+        let Some(sink) = self.sink.open_iap2().await else {
-+            return;
-+        };
-+
-+        let (client, drain) = AsyncClient::new(false, CsmRemote::airplay(), sink);
-         self.streams.iap2_drain.replace(drain);
-         self.streams.iap2.replace(client);
-     }
- 
-     async fn flush_iap2(&mut self) -> RtspResult<()> {
-+        let mut drop_iap2 = false;
-+        if let Some(iap2) = self.streams.iap2.as_mut() {
-+            if let Err(err) = iap2.reconcile().await {
-+                warn!("iAP2 over AirPlay stopped (continuing CarPlay): {err:?}");
-+                drop_iap2 = true;
-+            } else if iap2.status() == CsmSessionStatus::Detecting
-+                && self
-+                    .streams
-+                    .iap2_started
-+                    .is_some_and(|started| started.elapsed() >= Duration::from_secs(15))
-+            {
-+                warn!("iAP2 over AirPlay timed out in Detecting state; disabling iAP2");
-+                drop_iap2 = true;
-+            }
-+        }
-+        if drop_iap2 {
-+            if let Some(mut iap2) = self.streams.iap2.take() {
-+                iap2.shutdown().await;
-+            }
-+            self.streams.iap2_drain = None;
-+            return Ok(());
-+        }
-+
-         if let Some(handle) = self.streams.handle.as_mut()
-             && let Some(drain) = self.streams.iap2_drain.as_mut()
--            && let Some(packet) = drain.take()
-         {
--            debug!("Forwarding iAP2 packet");
--            let fut = handle.send_command(Command::IApSendMessage(CommandIApSendMessage {
--                data: packet.into_inner().into(),
--            }))?;
-+            while let Some(packet) = drain.take() {
-+                debug!("Forwarding iAP2 packet");
-+                handle.send_command_and_forget(Command::IApSendMessage(CommandIApSendMessage {
-+                    data: packet.into_inner().into(),
-+                }));
-+            }
-         }
- 
-         Ok(())
-@@ -900,10 +932,6 @@ impl AirPlayReceiver {
- 
-         self.sink.on_initial_setup().await?;
- 
--        if self.features.contains(AirPlayFeature::CAR) && self.wireless {
--            self.init_iap2(handle.clone()).await;
--        }
--
-         let (keep_alive_socket, keep_alive_bind) = UdpHelper::bind(bind_ip, KeepAliveServer::new())?;
- 
-         // Never enable a feature that the device did not offer
-@@ -995,6 +1023,9 @@ impl AirPlayReceiver {
-                 Ok(RtspResponse::new(None, HttpStatus::Ok))
-             }
-             Command::IApSendMessage(cmd) => {
-+                if self.streams.iap2.is_none() && self.features.contains(AirPlayFeature::CAR) && self.wireless {
-+                    self.init_iap2().await;
-+                }
-                 if let Some(iap2) = self.streams.iap2.as_mut() {
-                     iap2.read_frame_buf(&cmd.data);
-                 } else {

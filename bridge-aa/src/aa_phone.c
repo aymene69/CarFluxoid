@@ -245,10 +245,10 @@ static unsigned audio_sent,audio_acks,audio_underflows,audio_stalls,audio_peak,a
 static int audio_streaming;
 static uint64_t audio_full_at,audio_stats_at,audio_pump_at,audio_pump_gap_max;
 /* audio_focus: 0 none, 1 requested, 2 granted (GAIN, GAIN_TRANSIENT, LOSS_TRANSIENT_CAN_DUCK, GAIN_MEDIA_ONLY). */
-static int audio_focus;static uint64_t audio_focus_at,audio_last;
+static int audio_focus,audio_paused_by_focus;static uint64_t audio_focus_at,audio_last;
 static uint64_t audio_samples,audio_epoch,audio_prime_until;
 static unsigned audio_preroll_us;
-static void request_audio_focus(unsigned type,uint64_t now){unsigned char req[]={8,(unsigned char)type};send_msg(0,11,0x12,req,sizeof req);audio_focus_at=now;session_trace("TX audio_focus_request type=%u",type);}
+static void request_audio_focus(unsigned type,uint64_t now){if(type==1||type==4)audio_paused_by_focus=0;unsigned char req[]={8,(unsigned char)type};send_msg(0,11,0x12,req,sizeof req);audio_focus_at=now;session_trace("TX audio_focus_request type=%u",type);}
 static void audio_on_config(const unsigned char *body,size_t len){
  if(value(body,len,1,0)!=2){session_trace("AUDIO_CONFIG rejected %s",hex16(body,len));return;}
  audio_max_unacked=audio_window(value(body,len,2,1));audio_unacked=0;audio_ready=1;
@@ -355,8 +355,10 @@ static int pb_put_field_bytes(unsigned char *out,size_t cap,size_t *pos,unsigned
 }
 static unsigned char media_meta_buf[512];
 static size_t media_meta_len;
-static unsigned media_elapsed_secs;
-static char media_source_name[64]="CarPlay";
+static unsigned media_elapsed_secs,media_logged_state;
+static char media_source_name[64]="CarPlay",media_logged_source[64];
+static unsigned char media_logged_meta[512];
+static size_t media_logged_meta_len;
 static void send_default_media_meta(void){
  if(media_status_channel<=0||!media_status_ready||media_meta_len)return;
  unsigned char msg[64];size_t pos=0;
@@ -376,7 +378,11 @@ static void media_status_update(unsigned state){
  if(pb_put_field_bytes(msg,sizeof msg,&pos,2,(const unsigned char*)src,strlen(src)))return;
  if(pb_put_field_varint(msg,sizeof msg,&pos,3,media_elapsed_secs))return;
  send_msg(media_status_channel,11,0x8001,msg,pos);
- session_trace("AA_MEDIA_STATUS ch=%d state=%u pos=%us src=%s",media_status_channel,state,media_elapsed_secs,src);
+ if(state!=media_logged_state||strcmp(src,media_logged_source)!=0){
+  media_logged_state=state;
+  snprintf(media_logged_source,sizeof media_logged_source,"%s",src);
+  session_trace("AA_MEDIA_STATUS ch=%d state=%u pos=%us src=%s",media_status_channel,state,media_elapsed_secs,src);
+ }
 }
 /* Decode compact 0x30 NowPlaying datagram into AA MediaPlaybackMetadata (0x8003) protobuf. */
 static size_t encode_media_metadata(unsigned char *out,size_t cap,const unsigned char *pkt,size_t plen,unsigned *out_state,char app_out[64]){
@@ -410,14 +416,19 @@ static void media_metadata_on_control(const unsigned char *pkt,size_t plen){
  unsigned state=0;char app[64];
  size_t mlen=encode_media_metadata(media_meta_buf,sizeof media_meta_buf,pkt,plen,&state,app);
  if(!mlen)return;
+ int meta_changed=(mlen!=media_logged_meta_len||memcmp(media_meta_buf,media_logged_meta,mlen)!=0||strcmp(app,media_source_name)!=0);
  media_meta_len=mlen;
  snprintf(media_source_name,sizeof media_source_name,"%s",app);
  if(media_status_channel>0&&media_status_ready){
-  send_msg(media_status_channel,11,0x8003,media_meta_buf,media_meta_len);
+  if(meta_changed)send_msg(media_status_channel,11,0x8003,media_meta_buf,media_meta_len);
   if(state>=1&&state<=3)media_status_update(state);
   else if(audio_streaming)media_status_update(2);
-  fprintf(stderr,"AA_MEDIA_META ch=%d bytes=%zu state=%u pos=%us src=%s\n",media_status_channel,media_meta_len,state,media_elapsed_secs,media_source_name);
-  session_trace("AA_MEDIA_META ch=%d bytes=%zu state=%u pos=%us src=%s",media_status_channel,media_meta_len,state,media_elapsed_secs,media_source_name);
+  if(meta_changed){
+   memcpy(media_logged_meta,media_meta_buf,media_meta_len);
+   media_logged_meta_len=media_meta_len;
+   fprintf(stderr,"AA_MEDIA_META ch=%d bytes=%zu state=%u pos=%us src=%s\n",media_status_channel,media_meta_len,state,media_elapsed_secs,media_source_name);
+   session_trace("AA_MEDIA_META ch=%d bytes=%zu state=%u pos=%us src=%s",media_status_channel,media_meta_len,state,media_elapsed_secs,media_source_name);
+  }
  }
 }
 /* Dedicated AA Guidance audio sink (e.g. Uconnect VP2 ch=5, 16 kHz mono PCM16) for Waze/Siri prompts. */
@@ -528,7 +539,7 @@ static int find_guidance_audio(const unsigned char *p,size_t n){
 static void audio_start(uint64_t now,uint64_t start){
  unsigned char begin[8]={8};size_t n=1;unsigned id=++audio_session;
  do{begin[n++]=(unsigned char)((id&127)|(id>=128?128:0));id>>=7;}while(id);begin[n++]=16;begin[n++]=0;
- send_msg(audio_channel,11,0x8001,begin,n);audio_streaming=1;audio_unacked=0;audio_epoch=now-start;audio_samples=0;audio_prime_until=0;
+ send_msg(audio_channel,11,0x8001,begin,n);audio_streaming=1;audio_unacked=0;audio_epoch=now-start;audio_samples=0;audio_prime_until=0;audio_paused_by_focus=0;
  media_status_update(2);
  session_trace("AUDIO_START session=%u discarded=%u",audio_session,audio_discarded);
 }
@@ -547,10 +558,18 @@ static void audio_on_focus_at(unsigned state,uint64_t now){
   session_trace("AUDIO_FOCUS state=%u guidance_only",state);
   return;
  }
+ int was_requested=(audio_focus==1);
  audio_focus=state==1||state==2||state==4||state==6?2:0;
  if(audio_focus){
+  int play_sent=0;
   guidance_focus=0;
-  session_trace("AUDIO_FOCUS state=%u granted",state);
+  /* Unsolicited GAIN after a focus-loss Pause (2nd click of Uconnect Pause/Mute): resume CarPlay. */
+  if(!was_requested&&audio_paused_by_focus&&(state==1||state==2)){
+   unsigned char play_cmd[]={0x20,1};
+   play_sent=forward_input_report(play_cmd,sizeof play_cmd);
+   audio_paused_by_focus=0;
+  }
+  session_trace("AUDIO_FOCUS state=%u granted play_sent=%d",state,play_sent);
  }else{
   int was_streaming=audio_streaming,pause_sent=0;
   audio_stop("focus_lost");guidance_focus=0;guidance_stop("focus_lost");
@@ -559,6 +578,9 @@ static void audio_on_focus_at(unsigned state,uint64_t now){
   if(was_streaming&&(state==3||state==5)){
    unsigned char pause_cmd[]={0x20,2};
    pause_sent=forward_input_report(pause_cmd,sizeof pause_cmd);
+   audio_paused_by_focus=pause_sent?1:0;
+  }else{
+   audio_paused_by_focus=0;
   }
   session_trace("AUDIO_FOCUS state=%u lost pause_sent=%d",state,pause_sent);
  }
@@ -834,8 +856,14 @@ static void forward_car_controls(const unsigned char *p,size_t n){
    int long_press=value(event,event_size,4,0)!=0;
    int forwarded=0;
    if(mapped){
-    /* Uconnect VP2 reports VR long-press (0x54, down=1, long=1) without a matching release; signal tap (2). */
-    unsigned char val=state?(input_bindings[i].type==0x22&&long_press?2:input_bindings[i].button):0;
+    /* Uconnect VP2 reports VR long-press (0x54, down=1, long=1) without a matching release; signal tap (2).
+     * Long-press on the steering-wheel green Call key (0x10004 -> HookSwitch) hangs up via Telephony Drop (3). */
+    unsigned char val=0;
+    if(state){
+     if(input_bindings[i].type==0x22&&long_press)val=2;
+     else if(input_bindings[i].type==0x21&&input_bindings[i].button==1&&long_press)val=3;
+     else val=input_bindings[i].button;
+    }
     unsigned char report[]={input_bindings[i].type,val};
     forwarded=forward_input_report(report,sizeof report);
    }

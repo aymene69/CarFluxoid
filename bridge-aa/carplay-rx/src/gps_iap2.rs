@@ -13,9 +13,10 @@ use async_trait::async_trait;
 use catplay_csm::{
     decoder::{CsmFlag, CsmPacketBox, CsmPacketId},
     msg::{
-        DeviceTimeUpdate, EngineTypes, IdentificationInformation, LocationInformation,
-        LocationInformationComponent, NowPlayingUpdate, PlaybackStatus, PowerProvidingCapability,
-        SetNowPlayingInformation, StartLocationInformation, StartNowPlayingUpdates,
+        DeviceInformationUpdate, DeviceTimeUpdate, DeviceUUIDUpdate, EngineTypes,
+        IdentificationInformation, LocationInformation, LocationInformationComponent,
+        NowPlayingUpdate, PlaybackStatus, PowerProvidingCapability, SetNowPlayingInformation,
+        StartLocationInformation, StartNowPlayingUpdates,
         StartNowPlayingUpdatesMediaItemAttributes, StartNowPlayingUpdatesPlaybackAttributes,
         StopLocationInformation, StopNowPlayingUpdates, VehicleInformationComponent,
         WirelessCarPlayTransportComponent,
@@ -238,6 +239,11 @@ impl GpsHub {
         self.inner.lock().unwrap().status_path = Some(format!("{socket}.gps_cp"));
     }
 
+    pub fn set_status(&self, text: &str) {
+        let path = self.inner.lock().unwrap().status_path.clone();
+        Self::write_status(path.as_deref(), text);
+    }
+
     fn write_status(path: Option<&str>, text: &str) {
         if let Some(p) = path {
             let _ = std::fs::write(p, format!("{text}\n"));
@@ -448,6 +454,7 @@ pub struct GpsIap2Session {
     socket: String,
     now_playing: Option<NowPlayingUpdate>,
     last_meta_packet: Vec<u8>,
+    last_logged_meta: (u8, String, String, String),
     now_playing_started: bool,
     now_playing_received: Arc<AtomicBool>,
     session_alive: Arc<AtomicBool>,
@@ -472,6 +479,7 @@ impl GpsIap2Session {
             socket,
             now_playing: None,
             last_meta_packet: Vec::new(),
+            last_logged_meta: (0, String::new(), String::new(), String::new()),
             now_playing_started: false,
             now_playing_received: Arc::new(AtomicBool::new(false)),
             session_alive: Arc::new(AtomicBool::new(true)),
@@ -542,17 +550,21 @@ impl GpsIap2Session {
             let _ = sock.set_nonblocking(true);
             let _ = sock.send_to(&pkt, format!("{}.control", self.socket));
         }
-        eprintln!(
-            "CP_NOW_PLAYING state={state} pos={elapsed_secs}/{duration_secs}s app={app:?} title={title:?} artist={artist:?}"
-        );
+        let logged_key = (state, app.to_string(), title.to_string(), artist.to_string());
+        if logged_key != self.last_logged_meta {
+            self.last_logged_meta = logged_key;
+            eprintln!(
+                "CP_NOW_PLAYING state={state} pos={elapsed_secs}/{duration_secs}s app={app:?} title={title:?} artist={artist:?}"
+            );
+        }
     }
 
     pub fn build_identification(display_name: &str) -> IdentificationInformation {
         let mut id = IdentificationInformation {
             name: display_name.to_string(),
-            model_identifier: "CarFluxoid".into(),
-            manufacturer: "CarFluxoid".into(),
-            serial_number: "CFX-0001".into(),
+            model_identifier: display_name.to_string(),
+            manufacturer: display_name.to_string(),
+            serial_number: "123456789".into(),
             firmware_version: "1.0".into(),
             hardware_version: "1.0".into(),
             ..IdentificationInformation::default()
@@ -566,6 +578,8 @@ impl GpsIap2Session {
         id.messages_received_from_device = IdentificationInformation::pack_ids(&[
             StartLocationInformation::PACKET_ID,
             StopLocationInformation::PACKET_ID,
+            DeviceInformationUpdate::PACKET_ID,
+            DeviceUUIDUpdate::PACKET_ID,
             DeviceTimeUpdate::PACKET_ID,
             NowPlayingUpdate::PACKET_ID,
         ]);
@@ -605,6 +619,7 @@ impl GpsIap2Session {
 #[async_trait]
 impl CsmSession for GpsIap2Session {
     async fn start(&mut self, _handle: CsmClientHandleRef) -> CsmSessionResult<()> {
+        self.hub.set_status("iAP2 démarré");
         eprintln!("CP_IAP2_STARTED");
         Ok(())
     }
@@ -616,6 +631,11 @@ impl CsmSession for GpsIap2Session {
     ) -> CsmSessionResult<()> {
         if let Some(time) = packet.cast::<DeviceTimeUpdate>() {
             self.hub.on_device_time(time.seconds_since_reference_date);
+            return Ok(());
+        }
+        if packet.cast::<DeviceInformationUpdate>().is_some()
+            || packet.cast::<DeviceUUIDUpdate>().is_some()
+        {
             return Ok(());
         }
         if let Some(np) = packet.cast::<NowPlayingUpdate>() {
@@ -636,6 +656,7 @@ impl CsmSession for GpsIap2Session {
         let mut accepted = false;
         if ClientSessionHelper::handle_id(&packet, handle.clone(), &mut accepted, &self.id).await? {
             if accepted {
+                self.hub.set_status("Identifié (en attente iPhone)");
                 eprintln!("CP_IAP2_IDENTIFIED gps=enabled now_playing=enabled");
                 if !self.now_playing_started {
                     self.now_playing_started = true;

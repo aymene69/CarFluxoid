@@ -53,6 +53,9 @@ int main(void){
  const unsigned char tel[]={34,8,10,6,8,0x84,0x80,4,16,1};
  forward_car_controls(tel,sizeof tel);
  expect_report(receiver,0x21,1);
+ const unsigned char tel_long[]={34,10,10,8,8,0x84,0x80,4,16,1,32,1};
+ forward_car_controls(tel_long,sizeof tel_long);
+ expect_report(receiver,0x21,3);
  const unsigned char wheel[]={50,17,10,15,8,0x80,0x80,4,16,
                               0xfe,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,1};
  forward_car_controls(wheel,sizeof wheel);

@@ -42,14 +42,37 @@ int main(void){
  /* Next song: new session id. */
  int before=out_n;play(1);audio_pump(t+3000000,start);
  assert(out_n==before+2&&out_id[before]==0x8001&&out_body[before][1]==2&&out_id[before+1]==0);
- /* Focus loss while playing: STOP + hold off re-request during cooldown (prevents stealing focus back after Pause). */
- audio_on_focus_at(3,t+3000000);assert(out_id[out_n-1]==0x8002&&!audio_streaming&&!audio_focus);
+ /* Focus loss while playing: STOP + HID Pause + hold off re-request during cooldown. */
+ char bridge[64];
+ snprintf(bridge,sizeof bridge,"/tmp/audio-flow-%ld",(long)getpid());
+ assert(setenv("AA_VIDEO_SOCKET",bridge,1)==0);
+ struct sockaddr_un touch_addr={.sun_family=AF_UNIX};
+ snprintf(touch_addr.sun_path,sizeof touch_addr.sun_path,"%s.touch",bridge);
+ int touch_rx=socket(AF_UNIX,SOCK_DGRAM,0);
+ assert(touch_rx>=0&&bind(touch_rx,(struct sockaddr*)&touch_addr,sizeof touch_addr)==0);
+ audio_on_focus_at(3,t+3000000);assert(out_id[out_n-1]==0x8002&&!audio_streaming&&!audio_focus&&audio_paused_by_focus);
+ unsigned char hid[2];
+ assert(recv(touch_rx,hid,sizeof hid,MSG_DONTWAIT)==2&&hid[0]==0x20&&hid[1]==2); /* Pause */
  before=out_n;unsigned dropped=audio_discarded;play(1);audio_pump(t+3100000,start);
  assert(out_n==before&&audio_discarded==dropped+1); /* trailing PCM discarded without stealing focus */
- play(1);audio_pump(t+3000000+AUDIO_FOCUS_RETRY_US+1,start);
- assert(out_n==before+1&&out_id[before]==0x12&&out_body[before][1]==1&&audio_discarded==dropped+2);
+ /* Unsolicited focus GAIN (2nd click of Uconnect Pause/Mute): send HID Play once and resume. */
+ audio_on_focus_at(1,t+3200000);
+ assert(audio_focus==2&&!audio_paused_by_focus);
+ assert(recv(touch_rx,hid,sizeof hid,MSG_DONTWAIT)==2&&hid[0]==0x20&&hid[1]==1); /* Play */
+ audio_on_focus_at(1,t+3250000);
+ assert(recv(touch_rx,hid,sizeof hid,MSG_DONTWAIT)==-1&&errno==EAGAIN); /* no duplicate Play */
+ /* Start streaming again, lose focus, then wait past cooldown to test manual resume request. */
+ play(1);audio_pump(t+3300000,start);assert(audio_streaming);
+ audio_on_focus_at(3,t+3400000);assert(!audio_streaming&&audio_paused_by_focus);
+ assert(recv(touch_rx,hid,sizeof hid,MSG_DONTWAIT)==2&&hid[0]==0x20&&hid[1]==2); /* Pause */
+ before=out_n;dropped=audio_discarded;
+ play(1);audio_pump(t+3400000+AUDIO_FOCUS_RETRY_US+1,start);
+ assert(out_n==before+1&&out_id[before]==0x12&&out_body[before][1]==1&&audio_discarded==dropped+1&&!audio_paused_by_focus);
  /* Silence for 15 s: focus released. */
- audio_on_focus(1);audio_pump(t+30000000,start);
+ audio_on_focus(1);
+ assert(recv(touch_rx,hid,sizeof hid,MSG_DONTWAIT)==-1&&errno==EAGAIN); /* requested gain must not send Play */
+ close(touch_rx);unlink(touch_addr.sun_path);
+ audio_pump(t+30000000,start);
  assert(out_id[out_n-1]==0x12&&out_body[out_n-1][1]==4&&!audio_focus&&!audio_last);
  assert(audio_window(0)==1&&audio_window(100000)==AUDIO_WINDOW_MAX);
  assert(parse_audio_preroll(NULL)==0&&parse_audio_preroll("")==0&&parse_audio_preroll("0")==0);

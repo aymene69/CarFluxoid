@@ -19,3 +19,4 @@ catplay_bt={path="../../catplay/bluetooth/catplay_bt"}
 catplay_hid={path="../../catplay/carplay/catplay_hid"}
 catplay_csm={path="../../catplay/core/catplay_csm"}
 catplay_iap2_client={path="../../catplay/async/catplay_iap2_client"}
+macaddr="1.0.1"
