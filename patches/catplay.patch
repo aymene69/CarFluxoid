@@ -1,5 +1,5 @@
 diff --git a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
-index 97a52b4..ce97433 100644
+index 97a52b4..2359c66 100644
 --- a/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
 +++ b/carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs
 @@ -2,7 +2,7 @@ use async_trait::async_trait;
@@ -32,6 +32,15 @@ index 97a52b4..ce97433 100644
  
      pub fn new(
          iface: &str,
+@@ -370,7 +370,7 @@ impl AirPlayReceiver {
+                 features |= AirPlayFeature::AUDIO_PCM;
+                 features |= AirPlayFeature::AUDIO_UNENCRYPTED;
+                 features |= AirPlayFeature::SCREEN;
+-                features |= AirPlayFeature::ROTATE;
++                // Keep fixed landscape bounding box (800x480) so portrait phones pillarbox cleanly instead of sending tall portrait streams.
+                 features |= AirPlayFeature::UNIFIED_BONJOUR;
+                 // features |= AirPlayFeature::CAR;
+                 // features |= AirPlayFeature::CARPLAY_CONTROL;
 @@ -412,7 +412,7 @@ impl AirPlayReceiver {
              flags: AirPlayStatus::AUDIO,
              deviceid: match profile {
@@ -193,6 +202,38 @@ index ffe05c1..41e9903 100644
          Ok(())
      }
  
+diff --git a/carplay/catplay_carplay/src/msg/info.rs b/carplay/catplay_carplay/src/msg/info.rs
+index c9d840a..75c07a1 100644
+--- a/carplay/catplay_carplay/src/msg/info.rs
++++ b/carplay/catplay_carplay/src/msg/info.rs
+@@ -115,16 +115,27 @@ plist_struct! {
+     }
+ }
+ 
++fn is_zero_u32(v: &u32) -> bool {
++    *v == 0
++}
++
+ plist_struct! {
+     pub struct Display {
+         pub edid: Option<PlistByteArray>,
+         pub features: DisplayFeature,
+         #[serde(rename = "maxFPS")]
+         pub max_fps: Option<u32>,
++        pub height: Option<u32>,
++        pub width: Option<u32>,
+         pub height_pixels: u32,
+         pub width_pixels: u32,
++        #[serde(default, skip_serializing_if = "is_zero_u32")]
+         pub height_physical: u32,
++        #[serde(default, skip_serializing_if = "is_zero_u32")]
+         pub width_physical: u32,
++        pub refresh_rate: Option<u32>,
++        pub overscanned: Option<bool>,
++        pub rotation: Option<bool>,
+         pub uuid: String,
+         /// Absent in v210.81
+         pub primary_input_device: Option<PrimaryInputDevice>,
 diff --git a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs b/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
 index bd489fd..c8e8390 100644
 --- a/carplay/catplay_carplay/src/rtp/play/rtp_session.rs
@@ -377,6 +418,35 @@ index bd489fd..c8e8390 100644
      #[tokio::test]
      async fn latency_wakes_player_without_another_datagram() {
          let playback = Arc::new(Mutex::new(Playback::default()));
+diff --git a/carplay/catplay_carplay/src/screen/rx/screen_rx_session.rs b/carplay/catplay_carplay/src/screen/rx/screen_rx_session.rs
+index f9e1815..9e7ac37 100644
+--- a/carplay/catplay_carplay/src/screen/rx/screen_rx_session.rs
++++ b/carplay/catplay_carplay/src/screen/rx/screen_rx_session.rs
+@@ -81,10 +81,12 @@ impl TcpSession for ScreenReceiverSession {
+                     warn!("Received video frame before media clock was synchronized! Using pts = Instant::now()");
+                 }
+ 
+-                let frame = msg
++                let Some(frame) = msg
+                     .video_decode(config, self.clock.as_ref())
+                     .map_err(|e| RtspError::ProtocolViolationString(format!("failed to scan NAL offsets in VideoFrame: {e:?}")))?
+-                    .ok_or(RtspError::Empty)?;
++                else {
++                    return Ok(());
++                };
+ 
+                 let pts_decoded = frame.pts.decode();
+                 let display_ticks = frame.pts.0;
+@@ -158,6 +160,9 @@ impl TcpSession for ScreenReceiverSession {
+     }
+ 
+     async fn on_eof(&mut self, status: Option<RtspError>) {
++        if status.is_some() {
++            eprintln!("SCREEN_EOF status={status:?}");
++        }
+         warn!("Observed EOF on screen socket! {status:?}");
+     }
+ }
 diff --git a/catplay_carplay_rx_gadget/src/iap2_session.rs b/catplay_carplay_rx_gadget/src/iap2_session.rs
 index ac1d9de..aaaf5e7 100644
 --- a/catplay_carplay_rx_gadget/src/iap2_session.rs

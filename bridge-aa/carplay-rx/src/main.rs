@@ -115,12 +115,15 @@ impl Audio {
   }
  }
 }
-struct Screen { pipe:UnixStream, start:Instant, config:Option<AvccConfigExtended>, last_slow:Option<Instant>, airplay_control:Option<String> }
+struct Screen { pipe:UnixStream, start:Instant, config:Option<AvccConfigExtended>, last_slow:Option<Instant>, airplay_control:Option<String>, frames:u64 }
 #[async_trait]
 impl ScreenReceiverSink for Screen {
  async fn init(&mut self)->RtspResult<()>{Ok(())}
  async fn set_avcc_config(&mut self,c:AvccConfigExtended)->RtspResult<()>{
-  if c.hevc{return Err(RtspError::UnexpectedState("AA bridge currently requires H264".into()));}
+  if c.hevc{
+   eprintln!("SCREEN_ERR unexpected HEVC config {}x{}",c.width,c.height);
+   return Err(RtspError::UnexpectedState("AA bridge currently requires H264".into()));
+  }
   if let Some(ctrl)=&self.airplay_control {
    eprintln!("AIRPLAY_VIDEO_CONFIG {}x{}",c.width,c.height);
    if let Ok(s)=std::os::unix::net::UnixDatagram::unbound(){let _=s.set_nonblocking(true);let _=s.send_to(&[5],ctrl);}
@@ -134,23 +137,31 @@ impl ScreenReceiverSink for Screen {
   let parameters=self.config.as_ref().map_or(&[][..],|c|c.avcc.sps_pps.as_slice());
   // ScreenReceiver normally supplies Annex-B. Reject unexpected formats explicitly.
   if !f.data.starts_with(&[0,0,0,1])&&!f.data.starts_with(&[0,0,1]){
+   eprintln!("SCREEN_ERR non-annexb len={}",f.data.len());
    return Err(RtspError::UnexpectedState("Expected Annex-B CarPlay frame".into()));
   }
   let length=parameters.len()+f.data.len();
-  if length>1024*1024{return Err(RtspError::UnexpectedState("Video frame exceeds 1 MiB".into()));}
+  if length>1024*1024{
+   eprintln!("SCREEN_ERR frame too large bytes={length}");
+   return Err(RtspError::UnexpectedState("Video frame exceeds 1 MiB".into()));
+  }
   let stamp=f.pts.0.saturating_duration_since(self.start).as_micros() as u64;
   let mut header=[0u8;12];header[..4].copy_from_slice(&(length as u32).to_be_bytes());header[4..].copy_from_slice(&stamp.to_be_bytes());
   let mut slices=[IoSlice::new(&header),IoSlice::new(parameters),IoSlice::new(&f.data)];
   let mut pending=&mut slices[..];
   let started=Instant::now();
-  tokio::time::timeout(Duration::from_secs(2),async {
+  tokio::time::timeout(Duration::from_secs(5),async {
    while !pending.is_empty(){
     let written=self.pipe.write_vectored(pending).await?;
     if written==0{return Err(Error::from(ErrorKind::WriteZero));}
     IoSlice::advance_slices(&mut pending,written);
    }
    Ok(())
-  }).await.map_err(|_|RtspError::Timeout)?.map_err(|_|RtspError::Closed)?;
+  }).await.map_err(|_|{eprintln!("SCREEN_ERR write timeout bytes={length}");RtspError::Timeout})?.map_err(|e|{eprintln!("SCREEN_ERR write closed: {e}");RtspError::Closed})?;
+  self.frames+=1;
+  if self.airplay_control.is_some()&&(self.frames==1||self.frames.is_multiple_of(150)){
+   eprintln!("AIRPLAY_VIDEO_FRAME n={} bytes={length}",self.frames);
+  }
   let elapsed=started.elapsed();
   if elapsed>=Duration::from_millis(33)&&self.last_slow.is_none_or(|last|last.elapsed()>=Duration::from_secs(1)){
    self.last_slow=Some(Instant::now());
@@ -456,6 +467,7 @@ impl AirPlayReceiverSink for Receiver {
    self.session_active=true;
    ACTIVE_CARPLAY_SESSIONS.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
   }
+  if self.is_airplay{return Ok(());}
   let theme=web::options().theme;
   if let Some(night)=effective_night_mode(&theme,car_night_mode(&self.socket)) {
    if let Some(handle)=&self.handle {
@@ -506,8 +518,21 @@ impl AirPlayReceiverSink for Receiver {
    info.name=name.clone();
    info.model="AppleTV3,2".into();
    info.manufacturer="Apple Inc.".into();
-   let (physical_w,physical_h)=options.physical_size(w,h);
-   info.displays=vec![Display{width_pixels:w.into(),height_pixels:h.into(),width_physical:physical_w.into(),height_physical:physical_h.into(),max_fps:Some(30),features:catplay_carplay::msg::DisplayFeature::from_bits_retain(0x1E),uuid:"E5F7A68D-7B0F-4305-984B-974F677A150B".into(),..Default::default()}];
+   info.displays=vec![Display{
+    width:Some(w.into()),
+    height:Some(h.into()),
+    width_pixels:w.into(),
+    height_pixels:h.into(),
+    width_physical:0,
+    height_physical:0,
+    refresh_rate:Some(60),
+    max_fps:Some(30),
+    overscanned:Some(false),
+    rotation:Some(false),
+    features:catplay_carplay::msg::DisplayFeature::from_bits_retain(14),
+    uuid:"E5F7A68D-7B0F-4305-984B-974F677A150B".into(),
+    ..Default::default()
+   }];
    eprintln!("AIRPLAY_INFO name={name:?} display={w}x{h} fps=30");
    return;
   }
@@ -558,7 +583,7 @@ impl AirPlayReceiverSink for Receiver {
    eprintln!("AIRPLAY_SCREEN_OPEN");
    Some(ctrl)
   }else{None};
-  Ok(Box::new(Screen{pipe,start:Instant::now(),config:None,last_slow:None,airplay_control}))
+  Ok(Box::new(Screen{pipe,start:Instant::now(),config:None,last_slow:None,airplay_control,frames:0}))
  }
 }
 impl AsyncShutdown for Receiver {}
