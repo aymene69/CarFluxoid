@@ -1,0 +1,21 @@
+[package]
+name = "carfluxoid-dashboard-ui"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+preview = ["slint/std", "slint/backend-default", "slint/renderer-femtovg"]
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+slint = { version = "1.19.1", default-features = false, features = [
+    "compat-1-2",
+    "renderer-software",
+    "software-renderer-path",
+    "libm",
+    "unsafe-single-threaded",
+] }
+
+[build-dependencies]
+slint-build = "1.19.1"

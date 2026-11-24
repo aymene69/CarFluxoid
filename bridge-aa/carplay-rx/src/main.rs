@@ -445,6 +445,11 @@ impl AirPlayReceiverSink for Receiver {
   }
   Ok(())
  }
+ async fn negotiate_features(&mut self,offered:&[catplay_carplay::msg::ControllerFeature])->Vec<catplay_carplay::msg::ControllerFeature>{
+  let enabled:Vec<_>=offered.iter().copied().filter(|f|matches!(f,catplay_carplay::msg::ControllerFeature::IApChannel)).collect();
+  eprintln!("CP_FEATURES offered={offered:?} enabled={enabled:?}");
+  enabled
+ }
  async fn open_iap2(&mut self)->Option<catplay_iap2_client::CsmSessionBox>{
   Some(Box::new(gps_iap2::GpsIap2Session::new(self.mfi.clone(),web::bluetooth_name(),self.gps.clone(),self.socket.clone())))
  }
@@ -526,6 +531,22 @@ fn firmware_wifi(key:&str)->Option<String>{
 fn main()->Result<(),Box<dyn std::error::Error>>{
  eprintln!("CP_BOOT 1: executable entered");
  if std::env::args().nth(1).as_deref()==Some("--web"){web::serve()?;return Ok(());}
+ if std::env::args().nth(1).as_deref()==Some("--dashboard"){
+  let mut paths=carfluxoid_dashboard_ui::state::Paths::default();
+  let args:Vec<String>=std::env::args().skip(2).collect();
+  let mut i=0;
+  while i<args.len(){
+   match args[i].as_str(){
+    "--settings" if i+1<args.len()=>{paths.settings=args[i+1].clone().into();i+=2;}
+    "--assets" if i+1<args.len()=>{paths.assets=args[i+1].clone().into();i+=2;}
+    "--runtime" if i+1<args.len()=>{paths.runtime=args[i+1].clone().into();i+=2;}
+    "--bridge" if i+1<args.len()=>{paths.bridge=args[i+1].clone().into();i+=2;}
+    _=>{i+=1;}
+   }
+  }
+  carfluxoid_dashboard_ui::run_daemon(paths).map_err(|e|std::io::Error::other(e))?;
+  return Ok(());
+ }
  if std::env::args().nth(1).as_deref()==Some("--oem-info"){
   use catplay_carplay::rtsp_frame::{HttpStatus,RtspResponse};
   use std::io::Write;
@@ -550,7 +571,11 @@ async fn run()->Result<(),Box<dyn std::error::Error>>{
  env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(if std::env::var("AA_DIAGNOSTIC").as_deref()==Ok("1"){"info"}else{"warn"})).init();
  eprintln!("CP_BOOT 4: logger ready");
  let args:Vec<_>=std::env::args().collect();
- if args.get(1).map(String::as_str)==Some("--self-test"){eprintln!("CP_SELF_TEST_OK");return Ok(());}
+ if args.get(1).map(String::as_str)==Some("--self-test"){
+  carfluxoid_dashboard_ui::self_test().map_err(|e|std::io::Error::other(e))?;
+  eprintln!("CP_SELF_TEST_OK");
+  return Ok(());
+ }
  if args.get(1).map(String::as_str)==Some("--tap")&&args.len()==5{
   let x:u16=args[3].parse()?;let y:u16=args[4].parse()?;
   let (w,h)=display_size();if x>=w||y>=h{return Err("Coordinates outside negotiated display".into());}

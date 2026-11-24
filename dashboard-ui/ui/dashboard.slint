@@ -1,0 +1,1403 @@
+import "./fonts/Inter-Regular.ttf";
+import "./fonts/Inter-SemiBold.ttf";
+import "./fonts/Inter-Bold.ttf";
+
+global Palette {
+    in property <bool> day-mode: false;
+
+    out property <color> bg: day-mode ? #eef2f7 : #080d16;
+    out property <color> bg-deep: day-mode ? #e2e8f0 : #05080f;
+    out property <color> rail: day-mode ? #ffffff : #0d1524;
+    out property <color> surface: day-mode ? #ffffff : #121c2e;
+    out property <color> surface-alt: day-mode ? #f1f5f9 : #172338;
+    out property <color> surface-hover: day-mode ? #e2e8f0 : #1d2c46;
+    out property <color> border: day-mode ? #cbd5e1 : #22324c;
+    out property <color> border-strong: day-mode ? #94a3b8 : #2f4568;
+
+    out property <color> ink: day-mode ? #0f172a : #f4f7fc;
+    out property <color> muted: day-mode ? #475569 : #8ea2be;
+    out property <color> subtle: day-mode ? #64748b : #647896;
+
+    out property <color> accent: #14d4b4;
+    out property <color> accent-dark: #0d9488;
+    out property <color> accent-bg: day-mode ? #d1fae5 : #113537;
+    out property <color> accent-border: day-mode ? #34d399 : #216667;
+    out property <color> accent-ink: #041c1a;
+
+    out property <color> blue: #38bdf8;
+    out property <color> blue-bg: day-mode ? #e0f2fe : #102a43;
+    out property <color> amber: #f59e0b;
+    out property <color> amber-bg: day-mode ? #fef3c7 : #2d2110;
+    out property <color> red: #f87171;
+    out property <color> red-bg: day-mode ? #fee2e2 : #2d141a;
+}
+
+component NavRailButton inherits Rectangle {
+    in property <string> label;
+    in property <string> icon-commands;
+    in property <bool> active: false;
+    in property <bool> danger: false;
+    callback clicked();
+
+    height: 68px;
+    border-radius: 14px;
+    background: ta.pressed ? Palette.surface-hover
+        : active ? Palette.accent-bg
+        : danger ? Palette.surface-alt
+        : transparent;
+    border-width: active ? 1.5px : (danger ? 1px : 0px);
+    border-color: active ? Palette.accent-border : Palette.border;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 5px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+
+        Rectangle {
+            height: 24px;
+            Path {
+                width: 22px;
+                height: 22px;
+                x: (parent.width - self.width) / 2;
+                y: 1px;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon-commands;
+                stroke: active ? Palette.accent : (danger ? Palette.ink : Palette.muted);
+                stroke-width: 2px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+                fill: transparent;
+            }
+        }
+
+        Text {
+            text: root.label;
+            font-size: 11px;
+            font-weight: active ? 700 : 600;
+            color: active ? Palette.accent : (danger ? Palette.ink : Palette.muted);
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component StatusPill inherits Rectangle {
+    in property <string> text;
+    in property <color> dot-color: Palette.accent;
+
+    height: 28px;
+    border-radius: 14px;
+    background: Palette.surface-alt;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 11px;
+        spacing: 6px;
+        alignment: center;
+
+        Rectangle {
+            width: 7px;
+            height: 7px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3.5px;
+            background: root.dot-color;
+        }
+
+        Text {
+            text: root.text;
+            font-size: 12px;
+            font-weight: 600;
+            color: Palette.ink;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component SegmentOption inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 36px;
+    min-width: 64px;
+    border-radius: 9px;
+    background: ta.pressed ? Palette.surface-hover
+        : selected ? Palette.accent
+        : transparent;
+
+    Text {
+        text: root.label;
+        font-size: 13px;
+        font-weight: selected ? 700 : 600;
+        color: selected ? Palette.accent-ink : Palette.muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component ToggleSwitch inherits Rectangle {
+    in property <bool> checked: false;
+    callback toggled();
+
+    width: 60px;
+    height: 34px;
+    border-radius: 17px;
+    background: checked ? Palette.accent : Palette.surface-hover;
+    border-width: 1px;
+    border-color: checked ? Palette.accent : Palette.border-strong;
+
+    Rectangle {
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        y: 3px;
+        x: root.checked ? 29px : 3px;
+        background: #ffffff;
+    }
+
+    TouchArea {
+        clicked => { root.toggled(); }
+    }
+}
+
+component QuickCard inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> icon-commands;
+    in property <color> icon-tint: Palette.accent;
+    in property <color> icon-bg: Palette.accent-bg;
+    callback clicked();
+
+    border-radius: 16px;
+    background: ta.pressed ? Palette.surface-hover : Palette.surface;
+    border-width: 1px;
+    border-color: ta.pressed ? Palette.accent-border : Palette.border;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 16px;
+        spacing: 12px;
+
+        Rectangle {
+            width: 42px;
+            height: 42px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: root.icon-bg;
+
+            Path {
+                width: 20px;
+                height: 20px;
+                x: 11px;
+                y: 11px;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon-commands;
+                stroke: root.icon-tint;
+                stroke-width: 2px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+                fill: transparent;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+
+            Text {
+                text: root.title;
+                font-size: 15px;
+                font-weight: 700;
+                color: Palette.ink;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.subtitle;
+                font-size: 12px;
+                font-weight: 400;
+                color: Palette.muted;
+                overflow: elide;
+            }
+        }
+
+        Path {
+            width: 16px;
+            height: 16px;
+            y: (parent.height - self.height) / 2;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: "M 9 6 L 15 12 L 9 18";
+            stroke: Palette.subtle;
+            stroke-width: 2.2px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            fill: transparent;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component TelemetryCard inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> hint;
+    in property <color> accent-color: Palette.accent;
+
+    border-radius: 16px;
+    background: Palette.surface;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 6px;
+        alignment: space-between;
+
+        HorizontalLayout {
+            spacing: 7px;
+            alignment: start;
+
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: 4px;
+                border-radius: 4px;
+                background: root.accent-color;
+            }
+
+            Text {
+                text: root.label;
+                font-size: 12px;
+                font-weight: 600;
+                color: Palette.muted;
+                overflow: elide;
+            }
+        }
+
+        Text {
+            text: root.value;
+            font-size: 20px;
+            font-weight: 700;
+            color: Palette.ink;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.hint;
+            font-size: 11px;
+            font-weight: 400;
+            color: Palette.subtle;
+            overflow: elide;
+        }
+    }
+}
+
+component KeyCap inherits Rectangle {
+    in property <string> label;
+    in property <bool> accent: false;
+    in property <bool> muted-btn: false;
+    callback clicked();
+
+    height: 44px;
+    border-radius: 10px;
+    background: ta.pressed ? Palette.surface-hover
+        : accent ? Palette.accent
+        : muted-btn ? Palette.surface-alt
+        : Palette.surface;
+    border-width: 1px;
+    border-color: accent ? Palette.accent : Palette.border;
+
+    Text {
+        text: root.label;
+        font-size: 16px;
+        font-weight: 700;
+        color: accent ? Palette.accent-ink : Palette.ink;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component DashboardWindow inherits Window {
+    width: 800px;
+    height: 480px;
+    default-font-family: "Inter";
+    title: "CarFluxoid";
+    background: Palette.bg;
+
+    // Active surface & navigation
+    in-out property <bool> waiting-mode: false;
+    in-out property <string> active-page: "home"; // home | settings | network | system | keyboard
+    in-out property <bool> day-mode: false;
+
+    // Live telemetry & branding
+    in property <string> oem-name: "Autoradio";
+    in property <image> car-logo;
+    in property <bool> has-car-logo: false;
+    in property <string> version-text: "v1.0.2";
+    in property <string> build-text: "local";
+    in property <string> cpu-temp: "42.0 °C";
+    in property <string> gps-status: "En attente";
+    in property <string> night-status: "Auto";
+    in property <string> display-status: "800 × 480";
+    in property <string> web-url: "192.168.50.2";
+    in property <string> notice: "";
+
+    // CarPlay & Radio settings
+    in property <bool> auto-start: true;
+    in property <string> sidebar: "left";     // left | right | bottom
+    in property <string> theme: "auto";       // auto | day | night
+    in property <string> fps: "30";           // 10 | 15 | 20 | 30
+    in property <string> scale-percent: "85"; // 75 | 85 | 100 | 115 | 125
+    in property <string> wifi-name: "CarFluxoid-Pi_AP";
+    in property <string> bluetooth-name: "CarFluxoid";
+
+    // Keyboard state
+    in property <string> edit-target: "wifi"; // wifi | bluetooth
+    in property <string> draft: "";
+    in property <bool> shift: false;
+
+    // Callbacks handled in Rust
+    callback navigate(string);
+    callback start-carplay();
+    callback restart-carplay();
+    callback return-radio();
+    callback wait-back();
+    callback toggle-auto-start();
+    callback set-sidebar(string);
+    callback set-theme(string);
+    callback set-fps(string);
+    callback set-scale(string);
+    callback open-editor(string);
+    callback key-press(string);
+    callback key-shift();
+    callback key-erase();
+    callback key-clear();
+    callback key-save();
+    callback key-cancel();
+
+    // Sync theme global
+    changed day-mode => { Palette.day-mode = root.day-mode; }
+
+    // =========================================================================
+    // WAITING SCREEN (CarPlay pairing / connecting)
+    // =========================================================================
+    if root.waiting-mode: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: @linear-gradient(155deg, #07131d 0%, #0b1e29 52%, #07111a 100%);
+
+        // Subtle ambient accent bar at top
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 3px;
+            background: @linear-gradient(90deg, transparent 0%, #14d4b4 50%, transparent 100%);
+        }
+
+        // Main centered pairing card
+        Rectangle {
+            x: 44px;
+            y: 42px;
+            width: 712px;
+            height: 318px;
+            border-radius: 24px;
+            background: #0e1c2b;
+            border-width: 1.5px;
+            border-color: #214e55;
+
+            HorizontalLayout {
+                padding: 32px;
+                spacing: 28px;
+
+                // Left visual emblem
+                Rectangle {
+                    width: 148px;
+                    height: 148px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 36px;
+                    background: @linear-gradient(145deg, #123c42 0%, #0d2534 100%);
+                    border-width: 2px;
+                    border-color: #207674;
+
+                    // Wireless CarPlay waves + phone icon
+                    Path {
+                        width: 76px;
+                        height: 76px;
+                        x: 36px;
+                        y: 36px;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M 5 12.55 C 8.85 9.15 15.15 9.15 19 12.55 M 8.5 16.1 C 10.45 14.3 13.55 14.3 15.5 16.1 M 2 9 C 7.6 4.1 16.4 4.1 22 9 M 12 19.5 L 12.01 19.5";
+                        stroke: #22e3c3;
+                        stroke-width: 2.1px;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        fill: transparent;
+                    }
+                }
+
+                // Right instructions
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 14px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: "DÉMARRAGE CARPLAY";
+                        font-size: 12px;
+                        font-weight: 700;
+                        letter-spacing: 1.6px;
+                        color: #22e3c3;
+                    }
+
+                    Text {
+                        text: "Connectez votre iPhone";
+                        font-size: 32px;
+                        font-weight: 700;
+                        color: #f8fafc;
+                    }
+
+                    Text {
+                        text: "Ouvrez Réglages › Bluetooth sur l’iPhone et choisissez :";
+                        font-size: 15px;
+                        color: #94a3b8;
+                    }
+
+                    // Highlighted Bluetooth SSID badge
+                    Rectangle {
+                        height: 48px;
+                        border-radius: 12px;
+                        background: #091521;
+                        border-width: 1.5px;
+                        border-color: #1c6b69;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 10px;
+                            alignment: start;
+
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                y: 19px;
+                                border-radius: 5px;
+                                background: #14d4b4;
+                            }
+
+                            Text {
+                                text: root.bluetooth-name;
+                                font-size: 20px;
+                                font-weight: 700;
+                                color: #5ef3d9;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Acceptez ensuite l’invitation CarPlay sans fil sur votre iPhone.";
+                        font-size: 13px;
+                        color: #7c92ae;
+                    }
+                }
+            }
+        }
+
+        // Bottom left Back button + right status
+        Rectangle {
+            x: 44px;
+            y: 386px;
+            width: 248px;
+            height: 58px;
+            border-radius: 15px;
+            background: wb_ta.pressed ? #1f324d : #142236;
+            border-width: 1.5px;
+            border-color: #2d4466;
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 10px;
+
+                Path {
+                    width: 18px;
+                    height: 18px;
+                    y: 20px;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: "M 15 18 L 9 12 L 15 6";
+                    stroke: #f4f7fc;
+                    stroke-width: 2.3px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    fill: transparent;
+                }
+
+                Text {
+                    text: "Retour au menu";
+                    font-size: 17px;
+                    font-weight: 700;
+                    color: #f4f7fc;
+                    vertical-alignment: center;
+                }
+            }
+
+            wb_ta := TouchArea {
+                clicked => { root.wait-back(); }
+            }
+        }
+
+        Text {
+            x: 320px;
+            y: 405px;
+            width: 436px;
+            text: "Portail web : " + root.web-url + "  ·  " + root.version-text;
+            font-size: 13px;
+            color: #647896;
+            horizontal-alignment: right;
+        }
+    }
+
+    // =========================================================================
+    // MAIN AUTOMOTIVE SHELL (Left Rail + Top Bar + Active View)
+    // =========================================================================
+    if !root.waiting-mode: HorizontalLayout {
+        width: 100%;
+        height: 100%;
+
+        // ---------------------------------------------------------------------
+        // LEFT NAVIGATION RAIL (86px) — CarPlay / OEM style dock
+        // ---------------------------------------------------------------------
+        Rectangle {
+            width: 86px;
+            background: Palette.rail;
+
+            // Right hairline divider
+            Rectangle {
+                x: parent.width - 1px;
+                y: 0;
+                width: 1px;
+                height: 100%;
+                background: Palette.border;
+            }
+
+            VerticalLayout {
+                padding-left: 8px;
+                padding-right: 9px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: 8px;
+
+                NavRailButton {
+                    label: "Accueil";
+                    active: root.active-page == "home";
+                    icon-commands: "M 3 10.5 L 12 3 L 21 10.5 M 5 9.5 L 5 20 L 19 20 L 19 9.5";
+                    clicked => { root.navigate("home"); }
+                }
+
+                NavRailButton {
+                    label: "Réglages";
+                    active: root.active-page == "settings";
+                    icon-commands: "M 4 7 L 20 7 M 9 4 L 9 10 M 4 17 L 20 17 M 15 14 L 15 20";
+                    clicked => { root.navigate("settings"); }
+                }
+
+                NavRailButton {
+                    label: "Réseau";
+                    active: root.active-page == "network" || root.active-page == "keyboard";
+                    icon-commands: "M 5 12.5 C 8.9 9 15.1 9 19 12.5 M 8.5 16 C 10.5 14.2 13.5 14.2 15.5 16 M 2 9 C 7.6 4 16.4 4 22 9 M 12 19.5 L 12.01 19.5";
+                    clicked => { root.navigate("network"); }
+                }
+
+                NavRailButton {
+                    label: "Système";
+                    active: root.active-page == "system";
+                    icon-commands: "M 4 14 L 8 14 L 10.5 7 L 13.5 17 L 16 12 L 20 12";
+                    clicked => { root.navigate("system"); }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                // Pinned bottom button: Return to Uconnect / OEM Radio
+                NavRailButton {
+                    label: root.oem-name;
+                    danger: true;
+                    icon-commands: "M 10 17 L 5 12 L 10 7 M 5 12 L 16 12 M 16 5 L 19 5 L 19 19 L 16 19";
+                    clicked => { root.return-radio(); }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // RIGHT WORKSPACE (714 x 480)
+        // ---------------------------------------------------------------------
+        VerticalLayout {
+            horizontal-stretch: 1;
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 14px;
+            padding-bottom: 14px;
+            spacing: 12px;
+
+            // TOP HEADER BAR
+            HorizontalLayout {
+                height: 44px;
+                spacing: 10px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+
+                    Text {
+                        text: root.active-page == "home" ? "CarFluxoid"
+                            : root.active-page == "settings" ? "Réglages CarPlay"
+                            : root.active-page == "network" ? "Wi-Fi & Bluetooth"
+                            : root.active-page == "system" ? "Système & Capteurs"
+                            : root.edit-target == "wifi" ? "Nom du Wi-Fi"
+                            : "Nom Bluetooth";
+                        font-size: 24px;
+                        font-weight: 700;
+                        color: Palette.ink;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    StatusPill {
+                        y: 8px;
+                        text: root.cpu-temp;
+                        dot-color: Palette.accent;
+                    }
+
+                    StatusPill {
+                        y: 8px;
+                        text: root.night-status;
+                        dot-color: Palette.blue;
+                    }
+
+                    if root.has-car-logo: Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        y: 2px;
+                        border-radius: 10px;
+                        background: Palette.surface-alt;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        clip: true;
+
+                        Image {
+                            width: 32px;
+                            height: 32px;
+                            x: 4px;
+                            y: 4px;
+                            source: root.car-logo;
+                            image-fit: contain;
+                        }
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 1: ACCUEIL (CarPlay Hero + Quick Cards)
+            // =================================================================
+            if root.active-page == "home": VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    height: 344px;
+                    spacing: 14px;
+
+                    // HERO CARPLAY CARD
+                    Rectangle {
+                        horizontal-stretch: 12;
+                        height: 344px;
+                        border-radius: 22px;
+                        background: root.day-mode
+                            ? @linear-gradient(145deg, #0d3b3e 0%, #0a2533 100%)
+                            : @linear-gradient(145deg, #10323a 0%, #0d1d2e 65%, #0b1525 100%);
+                        border-width: 1.5px;
+                        border-color: #1f5c63;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 10px;
+                            alignment: space-between;
+
+                            // Top badge
+                            HorizontalLayout {
+                                alignment: space-between;
+
+                                Rectangle {
+                                    height: 28px;
+                                    width: 136px;
+                                    border-radius: 14px;
+                                    background: #14494e;
+                                    border-width: 1px;
+                                    border-color: #24787a;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 6px;
+                                        alignment: center;
+
+                                        Rectangle {
+                                            width: 7px;
+                                            height: 7px;
+                                            y: 10px;
+                                            border-radius: 3.5px;
+                                            background: #22e3c3;
+                                        }
+
+                                        Text {
+                                            text: "SANS FIL PRÊT";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            letter-spacing: 0.8px;
+                                            color: #6ff7df;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: root.version-text;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: #7ea3b8;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            // Title & subtitle
+                            VerticalLayout {
+                                spacing: 6px;
+
+                                Text {
+                                    text: "Apple CarPlay";
+                                    font-size: 36px;
+                                    font-weight: 700;
+                                    color: #f8fafc;
+                                }
+
+                                Text {
+                                    text: "Bluetooth : " + root.bluetooth-name;
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    color: #6ff7df;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: root.auto-start
+                                        ? "Démarrage automatique activé"
+                                        : "Démarrage manuel · touchez ci-dessous";
+                                    font-size: 13px;
+                                    color: #93afc4;
+                                }
+                            }
+
+                            // Primary CTA button
+                            Rectangle {
+                                height: 60px;
+                                border-radius: 15px;
+                                background: cp_ta.pressed ? #0fb89b
+                                    : @linear-gradient(90deg, #14d4b4 0%, #22c1dc 100%);
+
+                                HorizontalLayout {
+                                    padding-left: 20px;
+                                    padding-right: 20px;
+                                    alignment: space-between;
+
+                                    Text {
+                                        text: "Démarrer CarPlay";
+                                        font-size: 19px;
+                                        font-weight: 700;
+                                        color: #041d1c;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Path {
+                                        width: 22px;
+                                        height: 22px;
+                                        y: 19px;
+                                        viewbox-x: 0;
+                                        viewbox-y: 0;
+                                        viewbox-width: 24;
+                                        viewbox-height: 24;
+                                        commands: "M 5 12 L 19 12 M 13 6 L 19 12 L 13 18";
+                                        stroke: #041d1c;
+                                        stroke-width: 2.5px;
+                                        stroke-line-cap: round;
+                                        stroke-line-join: round;
+                                        fill: transparent;
+                                    }
+                                }
+
+                                cp_ta := TouchArea {
+                                    clicked => { root.start-carplay(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // RIGHT COLUMN QUICK ACTIONS
+                    VerticalLayout {
+                        horizontal-stretch: 10;
+                        height: 344px;
+                        spacing: 12px;
+
+                        QuickCard {
+                            height: 106px;
+                            title: "Redémarrer CarPlay";
+                            subtitle: "Relancer Wi-Fi & AirPlay";
+                            icon-tint: Palette.amber;
+                            icon-bg: Palette.amber-bg;
+                            icon-commands: "M 20 12 A 8 8 0 1 1 17.5 6.2 M 17.5 3 L 17.5 7 L 13.5 7";
+                            clicked => { root.restart-carplay(); }
+                        }
+
+                        QuickCard {
+                            height: 106px;
+                            title: "Réglages CarPlay";
+                            subtitle: root.fps + " FPS · Barre " + (root.sidebar == "left" ? "gauche" : root.sidebar == "right" ? "droite" : "bas");
+                            icon-tint: Palette.accent;
+                            icon-bg: Palette.accent-bg;
+                            icon-commands: "M 4 7 L 20 7 M 9 4 L 9 10 M 4 17 L 20 17 M 15 14 L 15 20";
+                            clicked => { root.navigate("settings"); }
+                        }
+
+                        QuickCard {
+                            height: 106px;
+                            title: "Wi-Fi & Bluetooth";
+                            subtitle: root.wifi-name;
+                            icon-tint: Palette.blue;
+                            icon-bg: Palette.blue-bg;
+                            icon-commands: "M 5 12.5 C 8.9 9 15.1 9 19 12.5 M 8.5 16 C 10.5 14.2 13.5 14.2 15.5 16 M 2 9 C 7.6 4 16.4 4 22 9 M 12 19.5 L 12.01 19.5";
+                            clicked => { root.navigate("network"); }
+                        }
+                    }
+                }
+
+                // BOTTOM BAR (Notice or Web URL)
+                Rectangle {
+                    height: 36px;
+                    border-radius: 10px;
+                    background: root.notice != "" ? Palette.accent-bg : Palette.surface;
+                    border-width: 1px;
+                    border-color: root.notice != "" ? Palette.accent-border : Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        alignment: space-between;
+
+                        Text {
+                            text: root.notice != "" ? root.notice : "Portail web & OTA :  http://" + root.web-url;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: root.notice != "" ? Palette.accent : Palette.muted;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: "GPS : " + root.gps-status;
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Palette.subtle;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 2: RÉGLAGES CARPLAY (Direct Segmented Controls + Toggle)
+            // =================================================================
+            if root.active-page == "settings": VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 10px;
+
+                // Row 1: Auto-start toggle
+                Rectangle {
+                    height: 60px;
+                    border-radius: 14px;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: space-between;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text { text: "Démarrage automatique CarPlay"; font-size: 15px; font-weight: 700; color: Palette.ink; }
+                            Text { text: "Lance CarPlay 2 s après la connexion autoradio"; font-size: 12px; color: Palette.muted; }
+                        }
+
+                        ToggleSwitch {
+                            y: 13px;
+                            checked: root.auto-start;
+                            toggled => { root.toggle-auto-start(); }
+                        }
+                    }
+                }
+
+                // Row 2: Sidebar position
+                Rectangle {
+                    height: 60px;
+                    border-radius: 14px;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        Text { text: "Barre CarPlay"; font-size: 15px; font-weight: 700; color: Palette.ink; vertical-alignment: center; }
+
+                        Rectangle {
+                            height: 44px;
+                            y: 8px;
+                            border-radius: 11px;
+                            background: Palette.bg-deep;
+                            border-width: 1px;
+                            border-color: Palette.border;
+
+                            HorizontalLayout {
+                                padding: 4px;
+                                spacing: 4px;
+                                SegmentOption { label: "Gauche"; min-width: 82px; selected: root.sidebar == "left"; clicked => { root.set-sidebar("left"); } }
+                                SegmentOption { label: "Droite"; min-width: 82px; selected: root.sidebar == "right"; clicked => { root.set-sidebar("right"); } }
+                                SegmentOption { label: "Bas"; min-width: 72px; selected: root.sidebar == "bottom"; clicked => { root.set-sidebar("bottom"); } }
+                            }
+                        }
+                    }
+                }
+
+                // Row 3: Theme
+                Rectangle {
+                    height: 60px;
+                    border-radius: 14px;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        Text { text: "Apparence"; font-size: 15px; font-weight: 700; color: Palette.ink; vertical-alignment: center; }
+
+                        Rectangle {
+                            height: 44px;
+                            y: 8px;
+                            border-radius: 11px;
+                            background: Palette.bg-deep;
+                            border-width: 1px;
+                            border-color: Palette.border;
+
+                            HorizontalLayout {
+                                padding: 4px;
+                                spacing: 4px;
+                                SegmentOption { label: "Auto"; min-width: 78px; selected: root.theme == "auto"; clicked => { root.set-theme("auto"); } }
+                                SegmentOption { label: "Jour"; min-width: 78px; selected: root.theme == "day"; clicked => { root.set-theme("day"); } }
+                                SegmentOption { label: "Nuit"; min-width: 78px; selected: root.theme == "night"; clicked => { root.set-theme("night"); } }
+                            }
+                        }
+                    }
+                }
+
+                // Row 4: FPS
+                Rectangle {
+                    height: 60px;
+                    border-radius: 14px;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        Text { text: "Images / seconde"; font-size: 15px; font-weight: 700; color: Palette.ink; vertical-alignment: center; }
+
+                        Rectangle {
+                            height: 44px;
+                            y: 8px;
+                            border-radius: 11px;
+                            background: Palette.bg-deep;
+                            border-width: 1px;
+                            border-color: Palette.border;
+
+                            HorizontalLayout {
+                                padding: 4px;
+                                spacing: 4px;
+                                SegmentOption { label: "10"; min-width: 56px; selected: root.fps == "10"; clicked => { root.set-fps("10"); } }
+                                SegmentOption { label: "15"; min-width: 56px; selected: root.fps == "15"; clicked => { root.set-fps("15"); } }
+                                SegmentOption { label: "20"; min-width: 56px; selected: root.fps == "20"; clicked => { root.set-fps("20"); } }
+                                SegmentOption { label: "30"; min-width: 56px; selected: root.fps == "30"; clicked => { root.set-fps("30"); } }
+                            }
+                        }
+                    }
+                }
+
+                // Row 5: Scale + Apply/Restart
+                Rectangle {
+                    height: 60px;
+                    border-radius: 14px;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        Text { text: "Échelle CarPlay"; font-size: 15px; font-weight: 700; color: Palette.ink; vertical-alignment: center; }
+
+                        Rectangle {
+                            height: 44px;
+                            y: 8px;
+                            border-radius: 11px;
+                            background: Palette.bg-deep;
+                            border-width: 1px;
+                            border-color: Palette.border;
+
+                            HorizontalLayout {
+                                padding: 4px;
+                                spacing: 4px;
+                                SegmentOption { label: "75%"; min-width: 54px; selected: root.scale-percent == "75"; clicked => { root.set-scale("75"); } }
+                                SegmentOption { label: "85%"; min-width: 54px; selected: root.scale-percent == "85"; clicked => { root.set-scale("85"); } }
+                                SegmentOption { label: "100%"; min-width: 58px; selected: root.scale-percent == "100"; clicked => { root.set-scale("100"); } }
+                                SegmentOption { label: "115%"; min-width: 58px; selected: root.scale-percent == "115"; clicked => { root.set-scale("115"); } }
+                            }
+                        }
+                    }
+                }
+
+                // Footer action row
+                HorizontalLayout {
+                    height: 46px;
+                    spacing: 12px;
+                    alignment: space-between;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.notice != "" ? root.notice : "Reconnectez CarPlay pour appliquer les réglages.";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: root.notice != "" ? Palette.accent : Palette.muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    Rectangle {
+                        width: 224px;
+                        border-radius: 12px;
+                        background: rs_ta.pressed ? Palette.accent-dark : Palette.accent;
+
+                        Text {
+                            text: "Redémarrer CarPlay";
+                            font-size: 14px;
+                            font-weight: 700;
+                            color: Palette.accent-ink;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        rs_ta := TouchArea {
+                            clicked => { root.restart-carplay(); }
+                        }
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 3: WI-FI & BLUETOOTH
+            // =================================================================
+            if root.active-page == "network": VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 14px;
+
+                QuickCard {
+                    height: 92px;
+                    title: "Nom du réseau Wi-Fi (AP)";
+                    subtitle: root.wifi-name;
+                    icon-tint: Palette.blue;
+                    icon-bg: Palette.blue-bg;
+                    icon-commands: "M 5 12.5 C 8.9 9 15.1 9 19 12.5 M 8.5 16 C 10.5 14.2 13.5 14.2 15.5 16 M 2 9 C 7.6 4 16.4 4 22 9 M 12 19.5 L 12.01 19.5";
+                    clicked => { root.open-editor("wifi"); }
+                }
+
+                QuickCard {
+                    height: 92px;
+                    title: "Nom Bluetooth CarPlay";
+                    subtitle: root.bluetooth-name;
+                    icon-tint: Palette.accent;
+                    icon-bg: Palette.accent-bg;
+                    icon-commands: "M 7 7 L 17 17 L 12 22 L 12 2 L 17 7 L 7 17";
+                    clicked => { root.open-editor("bluetooth"); }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 16px;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text {
+                            text: "Portail Web d’administration";
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: Palette.ink;
+                        }
+
+                        Text {
+                            text: "Connectez votre téléphone au Wi-Fi « " + root.wifi-name + " » puis ouvrez :";
+                            font-size: 13px;
+                            color: Palette.muted;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: "http://" + root.web-url;
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: Palette.accent;
+                        }
+
+                        if root.notice != "": Text {
+                            text: root.notice;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: Palette.amber;
+                        }
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 4: SYSTÈME & CAPTEURS VOITURE
+            // =================================================================
+            if root.active-page == "system": VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "VERSION CARFLUXOID";
+                        value: root.version-text;
+                        hint: "Build " + root.build-text;
+                        accent-color: Palette.accent;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "TEMPÉRATURE CPU";
+                        value: root.cpu-temp;
+                        hint: "Raspberry Pi Zero 2 W";
+                        accent-color: Palette.amber;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "ÉCRAN AUTORADIO";
+                        value: root.display-status;
+                        hint: "Projection Android Auto";
+                        accent-color: Palette.blue;
+                    }
+                }
+
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "GPS VOITURE (iAP2)";
+                        value: root.gps-status;
+                        hint: "Antenne véhicule vers iPhone";
+                        accent-color: Palette.accent;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "PHARES (JOUR/NUIT)";
+                        value: root.night-status;
+                        hint: "Capteur luminosité voiture";
+                        accent-color: Palette.blue;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "PORTAIL WEB / OTA";
+                        value: root.web-url;
+                        hint: "Wi-Fi " + root.wifi-name;
+                        accent-color: Palette.accent;
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 5: CLAVIER TACTILE (Édition Wi-Fi / Bluetooth)
+            // =================================================================
+            if root.active-page == "keyboard": VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 8px;
+
+                // Input preview bar
+                Rectangle {
+                    height: 50px;
+                    border-radius: 12px;
+                    background: Palette.bg-deep;
+                    border-width: 1.5px;
+                    border-color: Palette.accent-border;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        alignment: space-between;
+
+                        Text {
+                            text: root.draft != "" ? root.draft : "Saisir un nom…";
+                            font-size: 20px;
+                            font-weight: 600;
+                            color: root.draft != "" ? Palette.ink : Palette.subtle;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: root.notice != "" ? root.notice : "1–32 car.";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: root.notice != "" ? Palette.red : Palette.subtle;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Row 1: digits
+                HorizontalLayout {
+                    spacing: 6px;
+                    for ch in ["1","2","3","4","5","6","7","8","9","0"]: KeyCap {
+                        horizontal-stretch: 1;
+                        label: ch;
+                        clicked => { root.key-press(ch); }
+                    }
+                }
+
+                // Row 2: azertyuiop
+                HorizontalLayout {
+                    spacing: 6px;
+                    for pair in [
+                        { l: "a", u: "A" }, { l: "z", u: "Z" }, { l: "e", u: "E" }, { l: "r", u: "R" }, { l: "t", u: "T" },
+                        { l: "y", u: "Y" }, { l: "u", u: "U" }, { l: "i", u: "I" }, { l: "o", u: "O" }, { l: "p", u: "P" }
+                    ]: KeyCap {
+                        horizontal-stretch: 1;
+                        label: root.shift ? pair.u : pair.l;
+                        clicked => { root.key-press(root.shift ? pair.u : pair.l); }
+                    }
+                }
+
+                // Row 3: qsdfghjklm
+                HorizontalLayout {
+                    spacing: 6px;
+                    for pair in [
+                        { l: "q", u: "Q" }, { l: "s", u: "S" }, { l: "d", u: "D" }, { l: "f", u: "F" }, { l: "g", u: "G" },
+                        { l: "h", u: "H" }, { l: "j", u: "J" }, { l: "k", u: "K" }, { l: "l", u: "L" }, { l: "m", u: "M" }
+                    ]: KeyCap {
+                        horizontal-stretch: 1;
+                        label: root.shift ? pair.u : pair.l;
+                        clicked => { root.key-press(root.shift ? pair.u : pair.l); }
+                    }
+                }
+
+                // Row 4: wxcvbn._-
+                HorizontalLayout {
+                    spacing: 6px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    for pair in [
+                        { l: "w", u: "W" }, { l: "x", u: "X" }, { l: "c", u: "C" }, { l: "v", u: "V" }, { l: "b", u: "B" },
+                        { l: "n", u: "N" }, { l: ".", u: "." }, { l: "_", u: "_" }, { l: "-", u: "-" }
+                    ]: KeyCap {
+                        horizontal-stretch: 1;
+                        label: root.shift ? pair.u : pair.l;
+                        clicked => { root.key-press(root.shift ? pair.u : pair.l); }
+                    }
+                }
+
+                // Row 5: controls
+                HorizontalLayout {
+                    spacing: 6px;
+                    KeyCap { horizontal-stretch: 14; muted-btn: true; label: "Annuler"; clicked => { root.key-cancel(); } }
+                    KeyCap { horizontal-stretch: 12; muted-btn: !root.shift; accent: root.shift; label: "Maj"; clicked => { root.key-shift(); } }
+                    KeyCap { horizontal-stretch: 22; muted-btn: true; label: "Espace"; clicked => { root.key-press(" "); } }
+                    KeyCap { horizontal-stretch: 14; muted-btn: true; label: "Effacer"; clicked => { root.key-erase(); } }
+                    KeyCap { horizontal-stretch: 12; muted-btn: true; label: "Vider"; clicked => { root.key-clear(); } }
+                    KeyCap { horizontal-stretch: 20; accent: true; label: "Enregistrer"; clicked => { root.key-save(); } }
+                }
+            }
+        }
+    }
+}

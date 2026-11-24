@@ -400,6 +400,10 @@ class Dashboard:
 
 
 def main():
+    import sys
+    native_ui = "/opt/carfluxoid/bin/catplay-aa-rx"
+    if os.environ.get("CARFLUXOID_LEGACY_PIL") != "1" and os.access(native_ui, os.X_OK):
+        os.execv(native_ui, ["catplay-aa-rx", "--dashboard", *sys.argv[1:]])
     parser=argparse.ArgumentParser()
     parser.add_argument("--settings",type=Path,default=Path("/var/lib/carfluxoid/settings"))
     parser.add_argument("--assets",type=Path,default=Path("/opt/carfluxoid/assets"))

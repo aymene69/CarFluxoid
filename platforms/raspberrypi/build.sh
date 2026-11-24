@@ -40,6 +40,7 @@ cc $pi_cflags -DSYS_io_pgetevents_time64=SYS_io_pgetevents \
 
 export CARGO_TARGET_DIR=/build/pi/target
 export OPENSSL_NO_VENDOR=1
+export RUST_FONTCONFIG_DLOPEN=1
 CARFLUXOID_VERSION=$(tr -d '\r\n' < /input/VERSION 2>/dev/null || echo dev)
 git_rev=$(git -c safe.directory=/input -C /input rev-parse --short HEAD 2>/dev/null || echo local)
 CARFLUXOID_BUILD="$(date -u +%Y%m%d-%H%M)-${git_rev}"

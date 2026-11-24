@@ -1,13 +1,11 @@
 #!/bin/sh
-# Launch projected Android Auto touchscreen dashboard (Python + Pillow + minimal FFmpeg).
+# Launch projected Android Auto touchscreen dashboard (Rust + Slint HMI).
 set -eu
 
 start() {
  mkdir -p /run/carfluxoid-ui
- env \
-  PYTHONDONTWRITEBYTECODE=1 \
-  /usr/sbin/carfluxoid-supervise start carfluxoid-dashboard 1 -- \
-   /usr/bin/python3 /opt/carfluxoid/bin/dashboard.py
+ /usr/sbin/carfluxoid-supervise start carfluxoid-dashboard 1 -- \
+  /opt/carfluxoid/bin/catplay-aa-rx --dashboard
 }
 
 stop() {

@@ -6,9 +6,11 @@ host=/build/pi/mbedtls
 out=/input/local/raspberrypi
 export CARGO_TARGET_DIR=/build/pi/target
 export OPENSSL_NO_VENDOR=1
+export RUST_FONTCONFIG_DLOPEN=1
 
 echo "=== Rust unit tests ==="
 cargo test --locked --manifest-path /input/bridge-aa/carplay-rx/Cargo.toml
+cargo test --manifest-path /input/dashboard-ui/Cargo.toml
 
 echo "=== C protocol & unit tests ==="
 cd /input/bridge-aa

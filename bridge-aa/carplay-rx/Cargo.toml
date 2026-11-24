@@ -3,7 +3,8 @@ name="catplay-aa-rx"
 version="0.1.0"
 edition="2024"
 [dependencies]
-image={version="=0.25.9",default-features=false,features=["png"]}
+image={version="0.25.10",default-features=false,features=["png"]}
+carfluxoid-dashboard-ui={path="../../dashboard-ui"}
 catplay_carplay={path="../../catplay/carplay/catplay_carplay",default-features=false}
 catplay_carplay_rx_gadget={path="../../catplay/catplay_carplay_rx_gadget"}
 catplay_hap={path="../../catplay/core/catplay_hap"}

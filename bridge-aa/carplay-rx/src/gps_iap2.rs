@@ -190,6 +190,7 @@ pub fn format_pascd(speed_mps: f64, uptime_secs: f64) -> String {
 
 struct GpsHubInner {
     handle: Option<CsmClientHandleRef>,
+    status_path: Option<String>,
     want_gpgga: bool,
     want_gprmc: bool,
     want_pascd: bool,
@@ -198,6 +199,7 @@ struct GpsHubInner {
     iphone_clock: Option<(u64, Instant)>,
     started: Instant,
     last_pascd_tx: Option<Instant>,
+    rx_logged: bool,
     tx_count: u64,
 }
 
@@ -217,6 +219,7 @@ impl GpsHub {
         Self {
             inner: Arc::new(Mutex::new(GpsHubInner {
                 handle: None,
+                status_path: None,
                 want_gpgga: false,
                 want_gprmc: false,
                 want_pascd: false,
@@ -225,8 +228,19 @@ impl GpsHub {
                 iphone_clock: None,
                 started: Instant::now(),
                 last_pascd_tx: None,
+                rx_logged: false,
                 tx_count: 0,
             })),
+        }
+    }
+
+    pub fn set_status_socket(&self, socket: &str) {
+        self.inner.lock().unwrap().status_path = Some(format!("{socket}.gps_cp"));
+    }
+
+    fn write_status(path: Option<&str>, text: &str) {
+        if let Some(p) = path {
+            let _ = std::fs::write(p, format!("{text}\n"));
         }
     }
 
@@ -271,8 +285,12 @@ impl GpsHub {
     }
 
     pub fn on_location(&self, loc: CarLocation) {
-        let (handle, packet, count) = {
+        let (handle, packet, count, status_path) = {
             let mut inner = self.inner.lock().unwrap();
+            if !inner.rx_logged {
+                inner.rx_logged = true;
+                eprintln!("CP_GPS_RX_FIRST lat_e7={} lon_e7={}", loc.lat_e7, loc.lon_e7);
+            }
             inner.last_loc = Some((loc, Instant::now()));
             let Some(handle) = inner.handle.clone() else {
                 return;
@@ -282,18 +300,23 @@ impl GpsHub {
             };
             let count = inner.tx_count;
             inner.tx_count += 1;
-            (handle, packet, count)
+            (handle, packet, count, inner.status_path.clone())
         };
         if let Err(err) = handle.send(&packet) {
             log::warn!("CP_GPS_TX failed: {err:?}");
-        } else if count.is_multiple_of(60) {
-            eprintln!(
-                "CP_GPS_TX n={} sentences={} lat_e7={} lon_e7={}",
-                count + 1,
-                packet.nmea_sentence.len(),
-                loc.lat_e7,
-                loc.lon_e7
-            );
+        } else {
+            if count == 0 || (count + 1).is_multiple_of(10) {
+                Self::write_status(status_path.as_deref(), &format!("Actif ({} trames)", count + 1));
+            }
+            if count.is_multiple_of(60) {
+                eprintln!(
+                    "CP_GPS_TX n={} sentences={} lat_e7={} lon_e7={}",
+                    count + 1,
+                    packet.nmea_sentence.len(),
+                    loc.lat_e7,
+                    loc.lon_e7
+                );
+            }
         }
     }
 
@@ -345,6 +368,7 @@ impl GpsHub {
                 "CP_GPS_SUBSCRIBED gpgga={} gprmc={} pascd={}",
                 inner.want_gpgga, inner.want_gprmc, inner.want_pascd
             );
+            Self::write_status(inner.status_path.as_deref(), "Abonné (en attente fix)");
             inner
                 .last_loc
                 .filter(|(_, at)| at.elapsed() <= Duration::from_secs(5))
@@ -361,6 +385,7 @@ impl GpsHub {
         inner.want_gpgga = false;
         inner.want_gprmc = false;
         inner.want_pascd = false;
+        Self::write_status(inner.status_path.as_deref(), "Arrêté par iPhone");
         eprintln!("CP_GPS_UNSUBSCRIBED");
     }
 
@@ -370,6 +395,9 @@ impl GpsHub {
         inner.want_gpgga = false;
         inner.want_gprmc = false;
         inner.want_pascd = false;
+        if let Some(p) = inner.status_path.as_deref() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -436,6 +464,7 @@ impl Drop for GpsIap2Session {
 impl GpsIap2Session {
     pub fn new(mfi: Option<MfiDeficeRef>, display_name: String, hub: GpsHub, socket: String) -> Self {
         let id = Self::build_identification(&display_name);
+        hub.set_status_socket(&socket);
         Self {
             mfi,
             id,
@@ -540,7 +569,7 @@ impl GpsIap2Session {
             DeviceTimeUpdate::PACKET_ID,
             NowPlayingUpdate::PACKET_ID,
         ]);
-        id.power_providing_capability = PowerProvidingCapability::None;
+        id.power_providing_capability = PowerProvidingCapability::Advanced;
         id.maximum_current_drawn_from_device = 0;
         id.supported_language = vec!["en".into()];
         id.current_language = "en".into();
@@ -587,6 +616,7 @@ impl CsmSession for GpsIap2Session {
     ) -> CsmSessionResult<()> {
         if let Some(time) = packet.cast::<DeviceTimeUpdate>() {
             self.hub.on_device_time(time.seconds_since_reference_date);
+            return Ok(());
         }
         if let Some(np) = packet.cast::<NowPlayingUpdate>() {
             self.forward_now_playing(np.clone());
