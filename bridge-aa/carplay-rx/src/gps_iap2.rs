@@ -569,7 +569,7 @@ impl GpsIap2Session {
             DeviceTimeUpdate::PACKET_ID,
             NowPlayingUpdate::PACKET_ID,
         ]);
-        id.power_providing_capability = PowerProvidingCapability::Advanced;
+        id.power_providing_capability = PowerProvidingCapability::None;
         id.maximum_current_drawn_from_device = 0;
         id.supported_language = vec!["en".into()];
         id.current_language = "en".into();

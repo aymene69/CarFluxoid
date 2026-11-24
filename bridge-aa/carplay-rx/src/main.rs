@@ -446,9 +446,10 @@ impl AirPlayReceiverSink for Receiver {
   Ok(())
  }
  async fn negotiate_features(&mut self,offered:&[catplay_carplay::msg::ControllerFeature])->Vec<catplay_carplay::msg::ControllerFeature>{
-  let enabled:Vec<_>=offered.iter().copied().filter(|f|matches!(f,catplay_carplay::msg::ControllerFeature::IApChannel)).collect();
-  eprintln!("CP_FEATURES offered={offered:?} enabled={enabled:?}");
-  enabled
+  // catplay handles iAP2 over RTSP iAPSendMessage, not the separate iAPChannel stream;
+  // enabling IApChannel causes iOS to send an unsupported SETUP stream (406).
+  eprintln!("CP_FEATURES offered={offered:?} enabled=[]");
+  vec![]
  }
  async fn open_iap2(&mut self)->Option<catplay_iap2_client::CsmSessionBox>{
   Some(Box::new(gps_iap2::GpsIap2Session::new(self.mfi.clone(),web::bluetooth_name(),self.gps.clone(),self.socket.clone())))
