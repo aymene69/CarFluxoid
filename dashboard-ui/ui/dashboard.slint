@@ -395,6 +395,7 @@ export component DashboardWindow inherits Window {
     in property <float> obd-rpm-ratio: 0.0;
     in property <string> obd-speed: "—";
     in property <string> obd-gear: "—";
+    in property <string> obd-shift-hint: ""; // "up" | "down" | ""
     in property <string> obd-power-torque: "—";
     in property <string> obd-boost: "—";
     in property <float> obd-boost-ratio: 0.0;
@@ -1235,34 +1236,79 @@ export component DashboardWindow inherits Window {
                         padding: 12px;
                         spacing: 14px;
 
-                        // Gear indicator badge
+                        // Gear indicator badge + Shift Up/Down arrow icon
                         Rectangle {
-                            width: 78px;
-                            height: 80px;
+                            width: 84px;
+                            height: 82px;
                             border-radius: 12px;
-                            background: Palette.accent-bg;
+                            background: root.obd-shift-hint == "up" && root.obd-rpm-ratio > 0.68 ? Palette.amber-bg
+                                : root.obd-shift-hint == "down" ? Palette.blue-bg
+                                : Palette.accent-bg;
                             border-width: 1.5px;
-                            border-color: Palette.accent-border;
+                            border-color: root.obd-shift-hint == "up" && root.obd-rpm-ratio > 0.68 ? Palette.amber
+                                : root.obd-shift-hint == "down" ? Palette.blue
+                                : Palette.accent-border;
 
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 1px;
+                            // Up chevron icon (Shift Up)
+                            if root.obd-shift-hint == "up": Path {
+                                x: (parent.width - self.width) / 2;
+                                y: 4px;
+                                width: 22px;
+                                height: 14px;
+                                viewbox-x: 0;
+                                viewbox-y: 0;
+                                viewbox-width: 24;
+                                viewbox-height: 16;
+                                commands: "M 4 13 L 12 4 L 20 13";
+                                stroke: root.obd-rpm-ratio > 0.68 ? Palette.amber : Palette.accent;
+                                stroke-width: 3px;
+                                stroke-line-cap: round;
+                                stroke-line-join: round;
+                                fill: transparent;
+                            }
 
-                                Text {
-                                    text: "RAPPORT";
-                                    font-size: 9px;
-                                    font-weight: 700;
-                                    color: Palette.muted;
-                                    horizontal-alignment: center;
-                                }
+                            if root.obd-shift-hint == "": Text {
+                                x: 0;
+                                y: 6px;
+                                width: parent.width;
+                                text: "RAPPORT";
+                                font-size: 9px;
+                                font-weight: 700;
+                                color: Palette.muted;
+                                horizontal-alignment: center;
+                            }
 
-                                Text {
-                                    text: root.obd-gear;
-                                    font-size: 36px;
-                                    font-weight: 700;
-                                    color: Palette.accent;
-                                    horizontal-alignment: center;
-                                }
+                            Text {
+                                x: 0;
+                                y: 18px;
+                                width: parent.width;
+                                height: 44px;
+                                text: root.obd-gear;
+                                font-size: 38px;
+                                font-weight: 700;
+                                color: root.obd-shift-hint == "up" && root.obd-rpm-ratio > 0.68 ? Palette.amber
+                                    : root.obd-shift-hint == "down" ? Palette.blue
+                                    : Palette.accent;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            // Down chevron icon (Shift Down)
+                            if root.obd-shift-hint == "down": Path {
+                                x: (parent.width - self.width) / 2;
+                                y: parent.height - 18px;
+                                width: 22px;
+                                height: 14px;
+                                viewbox-x: 0;
+                                viewbox-y: 0;
+                                viewbox-width: 24;
+                                viewbox-height: 16;
+                                commands: "M 4 3 L 12 12 L 20 3";
+                                stroke: Palette.blue;
+                                stroke-width: 3px;
+                                stroke-line-cap: round;
+                                stroke-line-join: round;
+                                fill: transparent;
                             }
                         }
 

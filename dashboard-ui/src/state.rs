@@ -51,6 +51,7 @@ pub struct ObdHud {
     pub rpm_ratio: f32,
     pub speed: String,
     pub gear: String,
+    pub shift_hint: String, // "up" | "down" | ""
     pub power_torque: String,
     pub boost: String,
     pub boost_ratio: f32,
@@ -77,15 +78,20 @@ fn json_num(text: &str, key: &str) -> Option<f64> {
 }
 
 fn json_str<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!("\"{key}\":\"");
+    let needle = format!("\"{key}\":");
     let start = text.find(&needle)? + needle.len();
-    let end = text[start..].find('"')?;
-    Some(&text[start..start + end])
+    let rest = text[start..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
 
 fn json_bool(text: &str, key: &str) -> bool {
-    let needle = format!("\"{key}\":true");
-    text.contains(&needle)
+    let needle = format!("\"{key}\":");
+    let Some(pos) = text.find(&needle) else {
+        return false;
+    };
+    text[pos + needle.len()..].trim_start().starts_with("true")
 }
 
 pub struct DashboardController {
@@ -182,6 +188,7 @@ impl DashboardController {
                 rpm_ratio: 0.0,
                 speed: "—".into(),
                 gear: "—".into(),
+                shift_hint: String::new(),
                 power_torque: "—".into(),
                 boost: "—".into(),
                 boost_ratio: 0.0,
@@ -209,6 +216,7 @@ impl DashboardController {
             "Appairez via l'app CarFluxoid".into()
         };
         let rpm_val = json_num(&raw, "rpm");
+        let speed_val = json_num(&raw, "speed_kmh");
         let boost_val = json_num(&raw, "boost_bar");
         let fuel_val = json_num(&raw, "fuel_level_pct");
         let hp_val = json_num(&raw, "power_hp");
@@ -218,6 +226,14 @@ impl DashboardController {
         let lam_val = json_num(&raw, "lambda");
         let dpf_temp = json_num(&raw, "dpf_temp_c");
         let gear_str = json_str(&raw, "gear").unwrap_or("—").to_string();
+        let gear_num = gear_str.parse::<u8>().ok();
+        let shift_hint = match (gear_num, rpm_val, speed_val) {
+            (Some(g), Some(r), _) if (1..=5).contains(&g) && r >= 2450.0 => "up".to_string(),
+            (Some(g), Some(r), Some(s)) if (2..=6).contains(&g) && s >= 12.0 && r <= 1250.0 => {
+                "down".to_string()
+            }
+            _ => String::new(),
+        };
 
         let power_torque = match (hp_val, nm_val) {
             (Some(hp), Some(nm)) => format!("{:.0} ch · {:.0} Nm", hp, nm),
@@ -248,10 +264,11 @@ impl DashboardController {
             rpm_ratio: rpm_val
                 .map(|v| (v as f32 / 5000.0).clamp(0.0, 1.0))
                 .unwrap_or(0.0),
-            speed: json_num(&raw, "speed_kmh")
+            speed: speed_val
                 .map(|v| format!("{:.0} km/h", v))
                 .unwrap_or_else(|| "—".into()),
             gear: gear_str,
+            shift_hint,
             power_torque,
             boost: boost_val
                 .map(|v| format!("{:+.2} bar", v))

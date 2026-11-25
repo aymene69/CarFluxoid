@@ -102,6 +102,7 @@ fn sync_ui(ui: &DashboardWindow, ctrl: &DashboardController, waiting: bool) {
     ui.set_obd_rpm_ratio(obd.rpm_ratio);
     ui.set_obd_speed(obd.speed.into());
     ui.set_obd_gear(obd.gear.into());
+    ui.set_obd_shift_hint(obd.shift_hint.into());
     ui.set_obd_power_torque(obd.power_torque.into());
     ui.set_obd_boost(obd.boost.into());
     ui.set_obd_boost_ratio(obd.boost_ratio);
