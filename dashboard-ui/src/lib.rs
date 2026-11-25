@@ -90,6 +90,18 @@ fn sync_ui(ui: &DashboardWindow, ctrl: &DashboardController, waiting: bool) {
     ui.set_edit_target(ctrl.edit_target.clone().into());
     ui.set_draft(ctrl.draft.clone().into());
     ui.set_shift(ctrl.shift);
+
+    let obd = ctrl.obd_hud();
+    ui.set_obd_connected(obd.connected);
+    ui.set_obd_status(obd.status.into());
+    ui.set_obd_rpm(obd.rpm.into());
+    ui.set_obd_speed(obd.speed.into());
+    ui.set_obd_boost(obd.boost.into());
+    ui.set_obd_coolant(obd.coolant.into());
+    ui.set_obd_fuel(obd.fuel.into());
+    ui.set_obd_battery(obd.battery.into());
+    ui.set_obd_consumption(obd.consumption.into());
+    ui.set_obd_dtc_summary(obd.dtc_summary.into());
 }
 
 fn wire_callbacks(

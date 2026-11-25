@@ -39,7 +39,7 @@ component NavRailButton inherits Rectangle {
     in property <bool> danger: false;
     callback clicked();
 
-    height: 68px;
+    height: 62px;
     border-radius: 14px;
     background: ta.pressed ? Palette.surface-hover
         : active ? Palette.accent-bg
@@ -384,6 +384,18 @@ export component DashboardWindow inherits Window {
     in property <string> draft: "";
     in property <bool> shift: false;
 
+    // Live OBD-II telemetry (populated from /run/carfluxoid/obd.json)
+    in property <bool> obd-connected: false;
+    in property <string> obd-status: "Non connecté";
+    in property <string> obd-rpm: "—";
+    in property <string> obd-speed: "—";
+    in property <string> obd-boost: "—";
+    in property <string> obd-coolant: "—";
+    in property <string> obd-fuel: "—";
+    in property <string> obd-battery: "—";
+    in property <string> obd-consumption: "—";
+    in property <string> obd-dtc-summary: "Aucun défaut";
+
     // Callbacks handled in Rust
     callback navigate(string);
     callback start-carplay();
@@ -618,15 +630,22 @@ export component DashboardWindow inherits Window {
             VerticalLayout {
                 padding-left: 8px;
                 padding-right: 9px;
-                padding-top: 10px;
-                padding-bottom: 10px;
-                spacing: 8px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 6px;
 
                 NavRailButton {
                     label: "Accueil";
                     active: root.active-page == "home";
                     icon-commands: "M 3 10.5 L 12 3 L 21 10.5 M 5 9.5 L 5 20 L 19 20 L 19 9.5";
                     clicked => { root.navigate("home"); }
+                }
+
+                NavRailButton {
+                    label: "OBD";
+                    active: root.active-page == "obd";
+                    icon-commands: "M 4 17 C 4 12.6 7.6 9 12 9 C 16.4 9 20 12.6 20 17 M 12 17 L 16 12 M 7 17 L 17 17";
+                    clicked => { root.navigate("obd"); }
                 }
 
                 NavRailButton {
@@ -685,6 +704,7 @@ export component DashboardWindow inherits Window {
 
                     Text {
                         text: root.active-page == "home" ? "CarFluxoid"
+                            : root.active-page == "obd" ? "Télémétrie OBD-II"
                             : root.active-page == "settings" ? "Réglages CarPlay"
                             : root.active-page == "network" ? "Wi-Fi & Bluetooth"
                             : root.active-page == "system" ? "Système & Capteurs"
@@ -1157,6 +1177,72 @@ export component DashboardWindow inherits Window {
                         rs_ta := TouchArea {
                             clicked => { root.restart-carplay(); }
                         }
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 1B: OBD-II LIVE TELEMETRY
+            // =================================================================
+            if root.active-page == "obd": VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "RÉGIME MOTEUR";
+                        value: root.obd-rpm;
+                        hint: "Vitesse : " + root.obd-speed;
+                        accent-color: Palette.accent;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "TURBO / BOOST";
+                        value: root.obd-boost;
+                        hint: "Conso : " + root.obd-consumption;
+                        accent-color: Palette.amber;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "TEMP. EAU";
+                        value: root.obd-coolant;
+                        hint: "Batterie : " + root.obd-battery;
+                        accent-color: Palette.blue;
+                    }
+                }
+
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "CARBURANT";
+                        value: root.obd-fuel;
+                        hint: "MultiJet OBD-II";
+                        accent-color: Palette.accent;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "DIAGNOSTIC ECU";
+                        value: root.obd-dtc-summary;
+                        hint: "App CarFluxoid pour détails";
+                        accent-color: Palette.amber;
+                    }
+
+                    TelemetryCard {
+                        horizontal-stretch: 1;
+                        label: "BOÎTIER VGATE";
+                        value: root.obd-connected ? "Connecté" : "En attente";
+                        hint: root.obd-status;
+                        accent-color: root.obd-connected ? Palette.accent : Palette.muted;
                     }
                 }
             }

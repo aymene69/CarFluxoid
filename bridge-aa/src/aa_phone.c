@@ -893,19 +893,34 @@ static void update_night_mode(int night){
 }
 static uint64_t sensor_gps_file_at;
 static int32_t sensor_last_speed_e3=-1;
-static void write_gps_status(int32_t lat_e7,int32_t lon_e7,int32_t speed_e3,uint64_t now){
- if(sensor_gps_file_at&&now-sensor_gps_file_at<2000000ULL)return;
+static void write_gps_status(int32_t lat_e7,int32_t lon_e7,int32_t alt_e2,int has_alt,int32_t speed_e3,int32_t bearing_e6,int has_bearing,uint64_t now){
+ if(sensor_gps_file_at&&now-sensor_gps_file_at<1000000ULL)return;
  sensor_gps_file_at=now;
  const char *sock=getenv("AA_VIDEO_SOCKET");
  if(!sock||!*sock)return;
- char path[4096];
- if(snprintf(path,sizeof path,"%s.gps",sock)>=(int)sizeof path)return;
- FILE *f=fopen(path,"w");
- if(!f)return;
+ char path[4096],tmp[4096];
  int32_t spd=speed_e3>=0?speed_e3:sensor_last_speed_e3;
- if(spd>=0)fprintf(f,"%.5f,%.5f %.0f km/h\n",lat_e7/1e7,lon_e7/1e7,spd*0.0036);
- else fprintf(f,"%.5f,%.5f\n",lat_e7/1e7,lon_e7/1e7);
- fclose(f);
+ if(snprintf(path,sizeof path,"%s.gps",sock)<(int)sizeof path){
+  FILE *f=fopen(path,"w");
+  if(f){
+   if(spd>=0)fprintf(f,"%.5f,%.5f %.0f km/h\n",lat_e7/1e7,lon_e7/1e7,spd*0.0036);
+   else fprintf(f,"%.5f,%.5f\n",lat_e7/1e7,lon_e7/1e7);
+   fclose(f);
+  }
+ }
+ if(snprintf(path,sizeof path,"%s.gps.json",sock)<(int)sizeof path&&
+    snprintf(tmp,sizeof tmp,"%s.gps.json.tmp",sock)<(int)sizeof tmp){
+  FILE *f=fopen(tmp,"w");
+  if(f){
+   fprintf(f,"{\"lat\":%.6f,\"lon\":%.6f",lat_e7/1e7,lon_e7/1e7);
+   if(has_alt)fprintf(f,",\"alt_m\":%.1f",alt_e2/100.0);
+   if(spd>=0)fprintf(f,",\"speed_kmh\":%.1f",spd*0.0036);
+   if(has_bearing&&bearing_e6>=0)fprintf(f,",\"bearing\":%.1f",bearing_e6/1e6);
+   fprintf(f,",\"ts\":%llu}\n",(unsigned long long)time(NULL));
+   fclose(f);
+   rename(tmp,path);
+  }
+ }
 }
 static void parse_sensor_batch(const unsigned char *p,size_t n){
  size_t i=0,l;unsigned t;uint64_t v;const unsigned char *b;
@@ -943,7 +958,7 @@ static void parse_sensor_batch(const unsigned char *p,size_t n){
     put_le32(report+21,(uint32_t)bearing_e6);
     put_le32(report+25,flags);
     int forwarded=forward_input_report(report,sizeof report);
-    write_gps_status(lat_e7,lon_e7,(flags&4u)?speed_e3:-1,now_us());
+    write_gps_status(lat_e7,lon_e7,alt_e2,(flags&2u)!=0,(flags&4u)?speed_e3:-1,bearing_e6,(flags&8u)!=0,now_us());
     if(sensor_gps_count++%60==0){
      session_trace("AA_GPS_FIX n=%u lat=%d lon=%d alt=%d spd=%d brg=%d fwd=%d",
       sensor_gps_count,lat_e7,lon_e7,(flags&2u)?alt_e2:0,(flags&4u)?speed_e3:-1,(flags&8u)?bearing_e6:-1,forwarded);

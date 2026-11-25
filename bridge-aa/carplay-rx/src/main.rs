@@ -2,6 +2,7 @@
 mod web;
 mod microphone;
 mod gps_iap2;
+mod obd;
 use std::{io::{Error,ErrorKind,IoSlice},sync::Arc,time::{Duration,Instant}};
 use async_trait::async_trait;
 use catplay_carplay::{carplay_rx::{AirPlayReceiverProfile,AirPlayReceiverSink,sink::{AirPlayServer,AirPlayServerShared}},

@@ -42,6 +42,45 @@ pub struct Telemetry {
     pub display_status: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ObdHud {
+    pub connected: bool,
+    pub status: String,
+    pub rpm: String,
+    pub speed: String,
+    pub boost: String,
+    pub coolant: String,
+    pub fuel: String,
+    pub battery: String,
+    pub consumption: String,
+    pub dtc_summary: String,
+}
+
+fn json_num(text: &str, key: &str) -> Option<f64> {
+    let needle = format!("\"{key}\":");
+    let start = text.find(&needle)? + needle.len();
+    let rest = text[start..].trim_start();
+    if rest.starts_with("null") {
+        return None;
+    }
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+        .unwrap_or(rest.len());
+    rest[..end].parse::<f64>().ok()
+}
+
+fn json_str<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"");
+    let start = text.find(&needle)? + needle.len();
+    let end = text[start..].find('"')?;
+    Some(&text[start..start + end])
+}
+
+fn json_bool(text: &str, key: &str) -> bool {
+    let needle = format!("\"{key}\":true");
+    text.contains(&needle)
+}
+
 pub struct DashboardController {
     pub paths: Paths,
     pub active_page: String,
@@ -101,6 +140,73 @@ impl DashboardController {
             }
         }
         (800, 480)
+    }
+
+    pub fn obd_hud(&self) -> ObdHud {
+        let Some(raw) = Self::read_trimmed(&self.paths.bridge.join("obd.json")) else {
+            return ObdHud {
+                connected: false,
+                status: "Appairez via l'app CarFluxoid".into(),
+                rpm: "—".into(),
+                speed: "—".into(),
+                boost: "—".into(),
+                coolant: "—".into(),
+                fuel: "—".into(),
+                battery: "—".into(),
+                consumption: "—".into(),
+                dtc_summary: "Aucun défaut".into(),
+            };
+        };
+        let connected = json_bool(&raw, "connected");
+        let state = json_str(&raw, "state").unwrap_or("disconnected");
+        let status = if connected {
+            json_str(&raw, "adapter_name")
+                .unwrap_or("Vgate connecté")
+                .to_string()
+        } else if state == "connecting" || state == "reconnecting" {
+            "Connexion au boîtier…".into()
+        } else {
+            "Appairez via l'app CarFluxoid".into()
+        };
+        let dtc_count = raw
+            .find("\"dtcs\":[")
+            .map(|i| {
+                let slice = &raw[i + 8..];
+                let end = slice.find(']').unwrap_or(0);
+                slice[..end].matches("\"code\"").count()
+            })
+            .unwrap_or(0);
+        ObdHud {
+            connected,
+            status,
+            rpm: json_num(&raw, "rpm")
+                .map(|v| format!("{:.0} tr/min", v))
+                .unwrap_or_else(|| "—".into()),
+            speed: json_num(&raw, "speed_kmh")
+                .map(|v| format!("{:.0} km/h", v))
+                .unwrap_or_else(|| "—".into()),
+            boost: json_num(&raw, "boost_bar")
+                .map(|v| format!("{:+.2} bar", v))
+                .unwrap_or_else(|| "—".into()),
+            coolant: json_num(&raw, "coolant_c")
+                .map(|v| format!("{:.0} °C", v))
+                .unwrap_or_else(|| "—".into()),
+            fuel: json_num(&raw, "fuel_level_pct")
+                .map(|v| format!("{:.0} %", v))
+                .unwrap_or_else(|| "—".into()),
+            battery: json_num(&raw, "battery_v")
+                .map(|v| format!("{:.1} V", v))
+                .unwrap_or_else(|| "—".into()),
+            consumption: json_num(&raw, "fuel_l_per_100km")
+                .map(|v| format!("{:.1} L/100", v))
+                .or_else(|| json_num(&raw, "fuel_rate_lph").map(|v| format!("{:.1} L/h", v)))
+                .unwrap_or_else(|| "—".into()),
+            dtc_summary: if dtc_count == 0 {
+                "Aucun défaut".into()
+            } else {
+                format!("{dtc_count} défaut(s)")
+            },
+        }
     }
 
     pub fn oem_name(&self) -> String {

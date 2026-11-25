@@ -579,11 +579,15 @@ dependencies = [
  "catplay_iap2_client",
  "catplay_mfi",
  "catplay_util",
+ "dbus",
  "env_logger",
  "image",
+ "libc",
  "log",
  "macaddr",
  "openssl",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

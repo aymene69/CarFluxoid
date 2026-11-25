@@ -242,7 +242,13 @@ fn handle_ota(body:&[u8])->Result<String,String>{
  }
 }
 fn reply(s:&mut TcpStream,code:&str,mime:&str,data:&[u8]){
- let header=format!("HTTP/1.1 {code}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n",data.len());let _=s.write_all(header.as_bytes());let _=s.write_all(data);
+ let header=format!("HTTP/1.1 {code}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n",data.len());let _=s.write_all(header.as_bytes());let _=s.write_all(data);
+}
+fn extract_mac_body(body:&[u8])->Option<String>{
+ let text=std::str::from_utf8(body).ok()?.trim();
+ if let Some(m)=crate::obd::valid_mac(text){return Some(m);}
+ let v:serde_json::Value=serde_json::from_str(text).ok()?;
+ v.get("mac")?.as_str().and_then(crate::obd::valid_mac)
 }
 fn handle(mut s:TcpStream)->std::io::Result<()>{
  s.set_read_timeout(Some(Duration::from_secs(15)))?;s.set_write_timeout(Some(Duration::from_secs(15)))?;
@@ -285,10 +291,63 @@ fn handle(mut s:TcpStream)->std::io::Result<()>{
    else{match save(if path=="/name"{"name.txt"}else{"logo.png"},body){Ok(())=>reply(&mut s,"200 OK","text/plain",b"OK"),Err(e)=>{eprintln!("WEB_SETTINGS_SAVE {path}: {e}");reply(&mut s,"507 Insufficient Storage","text/plain",b"Ecriture impossible; ancien reglage conserve")}}}
   },
   ("POST","/reset")=>{let _=std::fs::remove_file(dir().join("logo.png"));let _=std::fs::remove_file(dir().join("name.txt"));let _=std::fs::remove_file(dir().join("options.txt"));reply(&mut s,"200 OK","text/plain",b"OK");},
+  ("OPTIONS",_)=>reply(&mut s,"204 No Content","text/plain",b""),
+  ("GET","/api/obd/live")=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes()),
+  ("GET","/api/obd/devices")=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::devices_json().as_bytes()),
+  ("POST","/api/obd/scan")=>{
+   match crate::obd::scan_devices_sync(){
+    Ok(json)=>reply(&mut s,"200 OK","application/json; charset=utf-8",json.as_bytes()),
+    Err(err)=>reply(&mut s,"500 Internal Server Error","text/plain; charset=utf-8",err.as_bytes()),
+   }
+  },
+  ("POST","/api/obd/connect")=>{
+   match extract_mac_body(body).ok_or_else(||"MAC Bluetooth invalide.".to_string()).and_then(|m|crate::obd::request_connect(&m)){
+    Ok(())=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes()),
+    Err(err)=>reply(&mut s,"400 Bad Request","text/plain; charset=utf-8",err.as_bytes()),
+   }
+  },
+  ("POST","/api/obd/disconnect")=>{crate::obd::request_disconnect();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
+  ("POST","/api/obd/dtc/read")=>{crate::obd::request_read_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
+  ("POST","/api/obd/dtc/clear")=>{crate::obd::request_clear_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
+  ("GET","/api/trips")=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::list_trips_json().as_bytes()),
+  ("GET",p) if p.starts_with("/api/trips/")=>{
+   let rest=&p["/api/trips/".len()..];
+   if let Some(id)=rest.strip_suffix(".gpx") {
+    match crate::obd::trip_to_gpx(id){
+     Some(gpx)=>reply(&mut s,"200 OK","application/gpx+xml; charset=utf-8",gpx.as_bytes()),
+     None=>reply(&mut s,"404 Not Found","text/plain",b"Trip not found"),
+    }
+   }else{
+    match crate::obd::get_trip_json(rest){
+     Some(json)=>reply(&mut s,"200 OK","application/json; charset=utf-8",json.as_bytes()),
+     None=>reply(&mut s,"404 Not Found","text/plain",b"Trip not found"),
+    }
+   }
+  },
+  ("DELETE",p) if p.starts_with("/api/trips/")=>{
+   let id=&p["/api/trips/".len()..];
+   if crate::obd::delete_trip(id){reply(&mut s,"200 OK","text/plain",b"OK");}
+   else{reply(&mut s,"404 Not Found","text/plain",b"Trip not found");}
+  },
   _=>reply(&mut s,"404 Not Found","text/plain",b"Not found")
  }Ok(())
 }
-pub fn serve()->std::io::Result<()>{let listener=TcpListener::bind("0.0.0.0:80")?;eprintln!("WEB_SETTINGS_READY http://192.168.50.2");for stream in listener.incoming(){match stream{Ok(s)=>{if let Err(e)=handle(s){eprintln!("WEB_SETTINGS_REQUEST: {e}");}},Err(e)=>{eprintln!("WEB_SETTINGS_ACCEPT: {e}");std::thread::sleep(Duration::from_millis(100));}}}Ok(())}
+pub fn serve()->std::io::Result<()>{
+ crate::obd::start_background();
+ let listener=TcpListener::bind("0.0.0.0:80")?;
+ eprintln!("WEB_SETTINGS_READY http://192.168.50.2");
+ for stream in listener.incoming(){
+  match stream{
+   Ok(s)=>{
+    let _=std::thread::Builder::new().name("http-req".into()).spawn(move||{
+     if let Err(e)=handle(s){eprintln!("WEB_SETTINGS_REQUEST: {e}");}
+    });
+   },
+   Err(e)=>{eprintln!("WEB_SETTINGS_ACCEPT: {e}");std::thread::sleep(Duration::from_millis(100));}
+  }
+ }
+ Ok(())
+}
 #[cfg(test)]mod tests{use super::*;#[test]fn png_and_names(){assert!(valid_name("Peugeot"));assert!(!valid_name("\n"));assert!(!valid_name(&"x".repeat(33)));assert_eq!(dimensions(include_bytes!("../assets/car.png")),Some((256,256)));assert!(dimensions(b"bad").is_none());}#[test]fn tar_path_guard_rejects_traversal(){assert!(validate_tar_entries("update-bundle/aa-phone\nupdate-bundle/SHA256SUMS\n").is_ok());assert!(validate_tar_entries("../etc/passwd\n").is_err());assert!(validate_tar_entries("/etc/passwd\n").is_err());assert!(validate_tar_entries("   \n").is_err());}}
 
 #[cfg(test)]mod scale_tests{use super::*;#[test]fn scale_preserves_default_and_aspect(){for(percent,width)in[(75,213),(100,160),(125,128),(150,106)]{let o=parse_options(&format!("scale_percent={percent}")).unwrap();assert_eq!(o.physical_size(800,480),(width,width*480/800));}assert!(parse_options("scale_percent=0").is_err());assert!(parse_options("scale_percent=999").is_err());}}
