@@ -192,6 +192,7 @@ pub struct ObdLiveSnapshot {
     pub dtcs: Vec<DtcCode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_trip: Option<TripSummary>,
+    pub debug_log: Vec<String>,
     pub updated_at: u64,
 }
 
@@ -231,6 +232,17 @@ fn service() -> Arc<ObdService> {
             })
         })
         .clone()
+}
+
+fn push_log(svc: &Arc<ObdService>, msg: impl Into<String>) {
+    let text = msg.into();
+    eprintln!("OBD_LOG {text}");
+    let mut live = svc.live.lock().unwrap();
+    live.debug_log.push(text);
+    if live.debug_log.len() > 24 {
+        let drop_n = live.debug_log.len() - 24;
+        live.debug_log.drain(0..drop_n);
+    }
 }
 
 pub fn valid_mac(raw: &str) -> Option<String> {
@@ -982,9 +994,12 @@ fn obd_worker_loop(svc: Arc<ObdService>) {
                 live.error = None;
                 write_dashboard_obd_snapshot(&live);
             }
-            match bt_linux::connect_elm(&mac) {
+            match bt_linux::connect_elm(&svc, &mac) {
                 Ok((mut transport, dev_name)) => {
-                    eprintln!("OBD_CONNECTED mac={mac} name={dev_name:?} transport={}", transport.transport_name());
+                    push_log(
+                        &svc,
+                        format!("Connecté {dev_name} ({})", transport.transport_name()),
+                    );
                     {
                         let mut live = svc.live.lock().unwrap();
                         live.state = "initializing".into();
@@ -1004,6 +1019,7 @@ fn obd_worker_loop(svc: Arc<ObdService>) {
                     }
                 }
                 Err(err) => {
+                    push_log(&svc, format!("Erreur BT: {err}"));
                     let mut live = svc.live.lock().unwrap();
                     live.connected = false;
                     live.state = "waiting".into();
@@ -1052,48 +1068,38 @@ fn update_trip_state(active_trip: &mut Option<ActiveTrip>, live: &mut ObdLiveSna
 }
 
 #[cfg(target_os = "linux")]
-fn run_elm_session(
+fn discover_supported_pids(
     svc: &Arc<ObdService>,
     transport: &mut dyn ElmTransport,
-    active_trip: &mut Option<ActiveTrip>,
-) {
-    let init_cmds = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATSP0"];
-    let mut elm_ver = None;
-    for cmd in init_cmds {
-        let timeout = if cmd == "ATZ" {
-            Duration::from_millis(2500)
-        } else {
-            Duration::from_millis(1200)
-        };
-        match transport.send_command(cmd, timeout) {
-            Ok(resp) => {
-                if cmd == "ATZ" {
-                    let v = resp
-                        .lines()
-                        .map(str::trim)
-                        .find(|l| !l.is_empty() && !l.starts_with("ATZ"))
-                        .map(str::to_string);
-                    elm_ver = v;
-                }
-            }
-            Err(e) => {
-                eprintln!("OBD_INIT_ERR cmd={cmd}: {e}");
-                svc.live.lock().unwrap().error = Some(format!("Init {cmd}: {e}"));
-                return;
-            }
-        }
-    }
-
-    // Discover supported Mode 01 PIDs (0100, 0120, 0140, 0160).
-    let mut supported: BTreeSet<u8> = BTreeSet::new();
+    supported: &mut BTreeSet<u8>,
+    first_timeout: Duration,
+) -> bool {
+    let mut any_ok = false;
     for base in [0x00u8, 0x20, 0x40, 0x60] {
         let cmd = format!("01{:02X}", base);
-        let Ok(resp) = transport.send_command(&cmd, Duration::from_millis(2500)) else {
-            break;
+        let tmo = if base == 0x00 {
+            first_timeout
+        } else {
+            Duration::from_millis(2500)
         };
+        let resp = match transport.send_command(&cmd, tmo) {
+            Ok(r) => r,
+            Err(e) => {
+                push_log(svc, format!("{cmd} -> {e}"));
+                break;
+            }
+        };
+        let summary: String = resp
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        push_log(svc, format!("{cmd} -> {summary}"));
         let Some(data) = parse_mode01_bytes(&resp, base) else {
             break;
         };
+        any_ok = true;
         let pids = decode_supported_pids(base, &data);
         let has_next = pids.contains(&(base + 0x20));
         supported.extend(pids);
@@ -1101,16 +1107,88 @@ fn run_elm_session(
             break;
         }
     }
+    any_ok
+}
+
+#[cfg(target_os = "linux")]
+fn run_elm_session(
+    svc: &Arc<ObdService>,
+    transport: &mut dyn ElmTransport,
+    active_trip: &mut Option<ActiveTrip>,
+) {
+    std::thread::sleep(Duration::from_millis(250));
+    let init_cmds = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATSP0"];
+    let mut elm_ver = None;
+    for cmd in init_cmds {
+        let timeout = if cmd == "ATZ" {
+            Duration::from_millis(3000)
+        } else {
+            Duration::from_millis(1500)
+        };
+        let mut res = transport.send_command(cmd, timeout);
+        if res.is_err() && cmd == "ATZ" {
+            std::thread::sleep(Duration::from_millis(400));
+            res = transport.send_command(cmd, timeout);
+        }
+        match res {
+            Ok(resp) => {
+                let one: String = resp
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && *l != cmd)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                push_log(
+                    svc,
+                    format!("{cmd} -> {}", if one.is_empty() { "OK" } else { &one }),
+                );
+                if cmd == "ATZ" {
+                    elm_ver = if one.is_empty() {
+                        Some("ELM327 / Vgate".into())
+                    } else {
+                        Some(one)
+                    };
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            }
+            Err(e) => {
+                push_log(svc, format!("Init {cmd} ERR: {e}"));
+                svc.live.lock().unwrap().error = Some(format!("Init {cmd}: {e}"));
+                return;
+            }
+        }
+    }
+
+    // Discover supported Mode 01 PIDs (0100..0160). Allow up to 8s on ATSP0 SEARCHING...,
+    // then explicitly try ATSP6 (CAN 11/500) and ATSP7 (CAN 29/500 Fiat/FCA) if needed.
+    let mut supported: BTreeSet<u8> = BTreeSet::new();
+    let mut ecu_ok = discover_supported_pids(svc, transport, &mut supported, Duration::from_secs(8));
+    if !ecu_ok {
+        for proto in ["ATSP6", "ATSP7"] {
+            push_log(svc, format!("Essai protocole {proto}..."));
+            let _ = transport.send_command(proto, Duration::from_millis(1500));
+            ecu_ok =
+                discover_supported_pids(svc, transport, &mut supported, Duration::from_secs(5));
+            if ecu_ok {
+                break;
+            }
+        }
+    }
+
     let protocol = transport
-        .send_command("ATDP", Duration::from_millis(1000))
+        .send_command("ATDP", Duration::from_millis(1200))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
     let supported_labels: Vec<String> = supported.iter().map(|p| format!("01{p:02X}")).collect();
-    eprintln!(
-        "OBD_READY elm={elm_ver:?} proto={protocol:?} pids={}",
-        supported_labels.len()
+    push_log(
+        svc,
+        format!(
+            "Prêt: {} ({} PIDs)",
+            protocol.as_deref().unwrap_or("CAN"),
+            supported_labels.len()
+        ),
     );
 
     // Initial DTC read.
@@ -1119,14 +1197,18 @@ fn run_elm_session(
         let mut live = svc.live.lock().unwrap();
         live.connected = true;
         live.state = "connected".into();
-        live.error = None;
+        live.error = if ecu_ok {
+            None
+        } else {
+            Some("ELM327 OK, mais calculateur muet (contact mis ?)".into())
+        };
         live.elm_version = elm_ver;
         live.protocol = protocol;
         live.supported_pids = supported_labels;
         live.dtcs = dtcs.clone();
     }
 
-    let has = |p: u8| supported.is_empty() || supported.contains(&p);
+    let mut probed_failures: HashMap<u8, u8> = HashMap::new();
     let mut last_slow = Instant::now() - Duration::from_secs(30);
     let mut consec_errors = 0u32;
 
@@ -1151,6 +1233,18 @@ fn run_elm_session(
             }
         }
 
+        let should_poll = |pid: u8, sup: &BTreeSet<u8>, fails: &HashMap<u8, u8>| -> bool {
+            sup.contains(&pid) || fails.get(&pid).copied().unwrap_or(0) < 2
+        };
+        let mark_probe = |pid: u8, ok: bool, sup: &mut BTreeSet<u8>, fails: &mut HashMap<u8, u8>| {
+            if ok {
+                sup.insert(pid);
+                fails.insert(pid, 0);
+            } else if !sup.contains(&pid) {
+                *fails.entry(pid).or_insert(0) += 1;
+            }
+        };
+
         let mut ok_this_cycle = false;
         // Fast tier: RPM, Speed, Load, MAP (Boost), Throttle, MAF, Direct Fuel Rate.
         let mut rpm = None;
@@ -1161,76 +1255,97 @@ fn run_elm_session(
         let mut maf = None;
         let mut direct_fuel_lph = None;
 
-        if has(0x0C) {
-            if let Ok(r) = transport.send_command("010C", Duration::from_millis(700)) {
+        if should_poll(0x0C, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("010C", Duration::from_millis(900)) {
                 if let Some(d) = parse_mode01_bytes(&r, 0x0C) {
                     if d.len() >= 2 {
                         rpm = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 4.0);
                         ok_this_cycle = true;
+                        got = true;
                     }
                 }
             }
+            mark_probe(0x0C, got, &mut supported, &mut probed_failures);
         }
-        if has(0x0D) {
-            if let Ok(r) = transport.send_command("010D", Duration::from_millis(700)) {
+        if should_poll(0x0D, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("010D", Duration::from_millis(900)) {
                 if let Some(d) = parse_mode01_bytes(&r, 0x0D) {
                     if !d.is_empty() {
                         speed = Some(f64::from(d[0]));
                         ok_this_cycle = true;
+                        got = true;
                     }
                 }
             }
+            mark_probe(0x0D, got, &mut supported, &mut probed_failures);
         }
-        if has(0x04) {
-            if let Ok(r) = transport.send_command("0104", Duration::from_millis(700)) {
+        if should_poll(0x04, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("0104", Duration::from_millis(900)) {
                 if let Some(d) = parse_mode01_bytes(&r, 0x04) {
                     if !d.is_empty() {
                         load = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
                         ok_this_cycle = true;
+                        got = true;
                     }
                 }
             }
+            mark_probe(0x04, got, &mut supported, &mut probed_failures);
         }
-        if has(0x0B) {
-            if let Ok(r) = transport.send_command("010B", Duration::from_millis(700)) {
+        if should_poll(0x0B, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("010B", Duration::from_millis(900)) {
                 if let Some(d) = parse_mode01_bytes(&r, 0x0B) {
                     if !d.is_empty() {
                         map = Some(f64::from(d[0]));
                         ok_this_cycle = true;
+                        got = true;
                     }
                 }
             }
+            mark_probe(0x0B, got, &mut supported, &mut probed_failures);
         }
-        if has(0x11) {
-            if let Ok(r) = transport.send_command("0111", Duration::from_millis(700)) {
+        if should_poll(0x11, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("0111", Duration::from_millis(900)) {
                 if let Some(d) = parse_mode01_bytes(&r, 0x11) {
                     if !d.is_empty() {
                         throttle = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
                         ok_this_cycle = true;
+                        got = true;
                     }
                 }
             }
+            mark_probe(0x11, got, &mut supported, &mut probed_failures);
         }
-        if supported.contains(&0x10) {
-            if let Ok(r) = transport.send_command("0110", Duration::from_millis(700)) {
+        if should_poll(0x10, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("0110", Duration::from_millis(900)) {
                 if let Some(d) = parse_mode01_bytes(&r, 0x10) {
                     if d.len() >= 2 {
                         maf = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 100.0);
                         ok_this_cycle = true;
+                        got = true;
                     }
                 }
             }
+            mark_probe(0x10, got, &mut supported, &mut probed_failures);
         }
-        if supported.contains(&0x5E) {
-            if let Ok(r) = transport.send_command("015E", Duration::from_millis(700)) {
+        if should_poll(0x5E, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("015E", Duration::from_millis(900)) {
                 if let Some(d) = parse_mode01_bytes(&r, 0x5E) {
                     if d.len() >= 2 {
                         direct_fuel_lph =
                             Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 20.0);
                         ok_this_cycle = true;
+                        got = true;
                     }
                 }
             }
+            mark_probe(0x5E, got, &mut supported, &mut probed_failures);
         }
 
         // Slow tier every 5 seconds: Coolant, Oil, Intake, Baro, Rail, Fuel Level, Ambient, Voltage.
@@ -1246,90 +1361,115 @@ fn run_elm_session(
 
         if do_slow {
             last_slow = Instant::now();
-            if has(0x05) {
-                if let Ok(r) = transport.send_command("0105", Duration::from_millis(800)) {
+            if should_poll(0x05, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0105", Duration::from_millis(1000)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x05) {
                         if !d.is_empty() {
                             coolant = Some(f64::from(d[0]) - 40.0);
                             ok_this_cycle = true;
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x05, got, &mut supported, &mut probed_failures);
             }
-            if has(0x0F) {
-                if let Ok(r) = transport.send_command("010F", Duration::from_millis(800)) {
+            if should_poll(0x0F, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("010F", Duration::from_millis(1000)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x0F) {
                         if !d.is_empty() {
                             intake = Some(f64::from(d[0]) - 40.0);
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x0F, got, &mut supported, &mut probed_failures);
             }
-            if supported.contains(&0x5C) {
-                if let Ok(r) = transport.send_command("015C", Duration::from_millis(800)) {
+            if should_poll(0x5C, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("015C", Duration::from_millis(1000)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x5C) {
                         if !d.is_empty() {
                             oil = Some(f64::from(d[0]) - 40.0);
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x5C, got, &mut supported, &mut probed_failures);
             }
-            if supported.contains(&0x33) {
-                if let Ok(r) = transport.send_command("0133", Duration::from_millis(800)) {
+            if should_poll(0x33, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0133", Duration::from_millis(1000)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x33) {
                         if !d.is_empty() {
                             baro = Some(f64::from(d[0]));
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x33, got, &mut supported, &mut probed_failures);
             }
-            if supported.contains(&0x23) {
-                if let Ok(r) = transport.send_command("0123", Duration::from_millis(800)) {
+            if should_poll(0x23, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0123", Duration::from_millis(1000)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x23) {
                         if d.len() >= 2 {
-                            // kPa = (A*256+B)*10 -> bar = kPa / 100 = raw / 10.
                             let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
                             rail_bar = Some((f64::from(raw) / 10.0).round());
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x23, got, &mut supported, &mut probed_failures);
             }
-            if supported.contains(&0x2F) {
-                if let Ok(r) = transport.send_command("012F", Duration::from_millis(800)) {
+            if should_poll(0x2F, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("012F", Duration::from_millis(1200)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x2F) {
                         if !d.is_empty() {
                             fuel_lvl = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x2F, got, &mut supported, &mut probed_failures);
             }
-            if supported.contains(&0x46) {
-                if let Ok(r) = transport.send_command("0146", Duration::from_millis(800)) {
+            if should_poll(0x46, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0146", Duration::from_millis(1000)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x46) {
                         if !d.is_empty() {
                             ambient = Some(f64::from(d[0]) - 40.0);
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x46, got, &mut supported, &mut probed_failures);
             }
-            if supported.contains(&0x42) {
-                if let Ok(r) = transport.send_command("0142", Duration::from_millis(800)) {
+            if should_poll(0x42, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0142", Duration::from_millis(1000)) {
                     if let Some(d) = parse_mode01_bytes(&r, 0x42) {
                         if d.len() >= 2 {
                             let mv = u16::from(d[0]) * 256 + u16::from(d[1]);
                             batt_v = Some((f64::from(mv) / 10.0).round() / 100.0);
+                            got = true;
                         }
                     }
                 }
+                mark_probe(0x42, got, &mut supported, &mut probed_failures);
             }
             if batt_v.is_none() {
-                if let Ok(r) = transport.send_command("AT RV", Duration::from_millis(800)) {
+                if let Ok(r) = transport.send_command("AT RV", Duration::from_millis(1000)) {
                     batt_v = parse_at_rv(&r);
                     if batt_v.is_some() {
                         ok_this_cycle = true;
                     }
                 }
             }
+            svc.live.lock().unwrap().supported_pids =
+                supported.iter().map(|p| format!("01{p:02X}")).collect();
         }
 
         if ok_this_cycle {
@@ -1440,9 +1580,14 @@ mod bt_linux {
     use super::*;
     use dbus::{
         arg::{PropMap, RefArg, Variant},
-        blocking::{Connection, stdintf::org_freedesktop_dbus::ObjectManager},
+        blocking::{
+            Connection,
+            stdintf::org_freedesktop_dbus::{ObjectManager, Properties, PropertiesPropertiesChanged},
+        },
+        channel::Token,
+        message::MatchRule,
     };
-    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::io::{AsRawFd, FromRawFd};
 
     const BLE_PAIRS: &[(&str, &str)] = &[
         // Vgate iCar Pro BLE ("IOS-Vlink")
@@ -1479,12 +1624,26 @@ mod bt_linux {
         props.get(key)?.0.as_i64().map(|v| v as i16)
     }
 
+    fn run_discovery(conn: &Connection, transport: &str, duration: Duration) {
+        let adapter = conn.with_proxy("org.bluez", "/org/bluez/hci0", Duration::from_secs(5));
+        let _ = adapter.set("org.bluez.Adapter1", "Powered", true);
+        let mut filter: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
+        filter.insert(
+            "Transport".into(),
+            Variant(Box::new(transport.to_string()) as Box<dyn RefArg>),
+        );
+        let _: Result<(), _> = adapter.method_call("org.bluez.Adapter1", "SetDiscoveryFilter", (filter,));
+        let _: Result<(), _> = adapter.method_call("org.bluez.Adapter1", "StartDiscovery", ());
+        std::thread::sleep(duration);
+        let _: Result<(), _> = adapter.method_call("org.bluez.Adapter1", "StopDiscovery", ());
+        // Allow Broadcom CYW43436 (Pi Zero 2 W) radio to exit scan mode cleanly before Connect().
+        std::thread::sleep(Duration::from_millis(400));
+    }
+
     pub fn scan_devices(duration: Duration) -> Result<Vec<BtDeviceInfo>, String> {
         let conn = Connection::new_system().map_err(|e| format!("D-Bus: {e}"))?;
-        let adapter = conn.with_proxy("org.bluez", "/org/bluez/hci0", Duration::from_secs(5));
-        let _started: Result<(), _> = adapter.method_call("org.bluez.Adapter1", "StartDiscovery", ());
-        std::thread::sleep(duration);
-        let _stopped: Result<(), _> = adapter.method_call("org.bluez.Adapter1", "StopDiscovery", ());
+        // LE scan catches Vgate iCar Pro ("IOS-Vlink") reliably even while Classic BT is active.
+        run_discovery(&conn, "le", duration.min(Duration::from_secs(5)));
 
         let root = conn.with_proxy("org.bluez", "/", Duration::from_secs(5));
         let objs = root
@@ -1519,35 +1678,97 @@ mod bt_linux {
         Ok(list)
     }
 
-    struct BleTransport {
+    struct BleNotifyTransport {
         conn: Connection,
+        notify_path: String,
         write_path: String,
         write_without_resp: bool,
-        notify_file: fs::File,
+        rx_buf: Arc<Mutex<Vec<u8>>>,
+        _match_token: Token,
     }
 
-    impl ElmTransport for BleTransport {
+    impl Drop for BleNotifyTransport {
+        fn drop(&mut self) {
+            let nproxy = self
+                .conn
+                .with_proxy("org.bluez", &self.notify_path, Duration::from_secs(2));
+            let _: Result<(), _> = nproxy.method_call("org.bluez.GattCharacteristic1", "StopNotify", ());
+        }
+    }
+
+    impl BleNotifyTransport {
+        fn write_raw(&mut self, payload: Vec<u8>) -> Result<(), String> {
+            let proxy = self
+                .conn
+                .with_proxy("org.bluez", &self.write_path, Duration::from_secs(3));
+            let try_write = |without_resp: bool| -> Result<(), dbus::Error> {
+                let mut opts: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
+                opts.insert(
+                    "type".into(),
+                    Variant(
+                        Box::new(if without_resp { "command" } else { "request" }.to_string())
+                            as Box<dyn RefArg>,
+                    ),
+                );
+                proxy.method_call(
+                    "org.bluez.GattCharacteristic1",
+                    "WriteValue",
+                    (payload.clone(), opts),
+                )
+            };
+            match try_write(self.write_without_resp) {
+                Ok(()) => Ok(()),
+                Err(first_err) => {
+                    // Retry with alternate write type (some Vgate chips only accept one).
+                    if try_write(!self.write_without_resp).is_ok() {
+                        self.write_without_resp = !self.write_without_resp;
+                        Ok(())
+                    } else {
+                        Err(format!("BLE write: {first_err}"))
+                    }
+                }
+            }
+        }
+    }
+
+    impl ElmTransport for BleNotifyTransport {
         fn transport_name(&self) -> &'static str {
             "ble"
         }
 
         fn send_command(&mut self, cmd: &str, timeout: Duration) -> Result<String, String> {
-            drain_nonblocking(&mut self.notify_file);
-            let payload = format!("{cmd}\r").into_bytes();
-            let proxy = self
-                .conn
-                .with_proxy("org.bluez", &self.write_path, Duration::from_secs(3));
-            let mut opts: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
-            if self.write_without_resp {
-                opts.insert(
-                    "type".into(),
-                    Variant(Box::new("command".to_string()) as Box<dyn RefArg>),
-                );
+            // Drain any stale notifications before writing.
+            let _ = self.conn.process(Duration::from_millis(5));
+            self.rx_buf.lock().unwrap().clear();
+
+            self.write_raw(format!("{cmd}\r").into_bytes())?;
+
+            let deadline = Instant::now() + timeout;
+            loop {
+                let _ = self.conn.process(Duration::from_millis(35));
+                {
+                    let guard = self.rx_buf.lock().unwrap();
+                    if guard.contains(&b'>') || guard.len() > 4096 {
+                        let text = String::from_utf8_lossy(&guard)
+                            .replace('\r', "\n")
+                            .replace('>', "");
+                        return Ok(text);
+                    }
+                }
+                if Instant::now() >= deadline {
+                    let guard = self.rx_buf.lock().unwrap();
+                    if !guard.is_empty() {
+                        let text = String::from_utf8_lossy(&guard)
+                            .replace('\r', "\n")
+                            .replace('>', "");
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() && trimmed != "SEARCHING..." {
+                            return Ok(text);
+                        }
+                    }
+                    return Err(format!("Timeout réponse {cmd}"));
+                }
             }
-            let res: Result<(), _> =
-                proxy.method_call("org.bluez.GattCharacteristic1", "WriteValue", (payload, opts));
-            res.map_err(|e| format!("BLE write: {e}"))?;
-            read_until_prompt(&mut self.notify_file, timeout)
         }
     }
 
@@ -1593,7 +1814,13 @@ mod bt_linux {
             let now = Instant::now();
             if now >= deadline {
                 if !buf.is_empty() {
-                    break;
+                    let text = String::from_utf8_lossy(&buf)
+                        .replace('\r', "\n")
+                        .replace('>', "");
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && trimmed != "SEARCHING..." {
+                        return Ok(text);
+                    }
                 }
                 return Err("Timeout réponse ELM327".into());
             }
@@ -1615,10 +1842,7 @@ mod bt_linux {
                     Ok(0) => return Err("Connexion OBD fermée (EOF)".into()),
                     Ok(n) => {
                         buf.extend_from_slice(&chunk[..n]);
-                        if buf.contains(&b'>') {
-                            break;
-                        }
-                        if buf.len() > 4096 {
+                        if buf.contains(&b'>') || buf.len() > 4096 {
                             break;
                         }
                     }
@@ -1642,6 +1866,9 @@ mod bt_linux {
             .get_managed_objects()
             .map_err(|e| format!("BlueZ GATT scan: {e}"))?;
         let mut by_uuid: HashMap<String, (String, Vec<String>)> = HashMap::new();
+        let mut fallback_notify: Option<String> = None;
+        let mut fallback_write: Option<(String, bool)> = None;
+
         for (path, ifaces) in objs {
             let pstr = path.to_string();
             if !pstr.starts_with(dev_path) {
@@ -1649,6 +1876,7 @@ mod bt_linux {
             }
             if let Some(ch) = ifaces.get("org.bluez.GattCharacteristic1") {
                 if let Some(uuid) = prop_str(ch, "UUID") {
+                    let u = uuid.to_ascii_lowercase();
                     let mut flags = Vec::new();
                     if let Some(fvar) = ch.get("Flags") {
                         if let Some(iter) = fvar.0.as_iter() {
@@ -1659,16 +1887,35 @@ mod bt_linux {
                             }
                         }
                     }
-                    by_uuid.insert(uuid.to_ascii_lowercase(), (pstr, flags));
+                    // Ignore standard GAP/GATT service changed char (2a05).
+                    let is_std = u.starts_with("00002a0");
+                    if !is_std {
+                        if fallback_notify.is_none()
+                            && flags.iter().any(|f| f == "notify" || f == "indicate")
+                        {
+                            fallback_notify = Some(pstr.clone());
+                        }
+                        if fallback_write.is_none()
+                            && flags
+                                .iter()
+                                .any(|f| f == "write-without-response" || f == "write")
+                        {
+                            let no_resp = flags.iter().any(|f| f == "write-without-response");
+                            fallback_write = Some((pstr.clone(), no_resp));
+                        }
+                    }
+                    by_uuid.insert(u, (pstr, flags));
                 }
             }
         }
         for &(notify_u, write_u) in BLE_PAIRS {
             if let (Some((np, _)), Some((wp, wflags))) = (by_uuid.get(notify_u), by_uuid.get(write_u)) {
-                let no_resp = wflags.iter().any(|f| f == "write-without-response")
-                    && !wflags.iter().any(|f| f == "write");
+                let no_resp = wflags.iter().any(|f| f == "write-without-response");
                 return Ok(Some((np.clone(), wp.clone(), no_resp)));
             }
+        }
+        if let (Some(np), Some((wp, no_resp))) = (fallback_notify, fallback_write) {
+            return Ok(Some((np, wp, no_resp)));
         }
         Ok(None)
     }
@@ -1713,25 +1960,36 @@ mod bt_linux {
         Ok(Box::new(RfcommTransport { file }))
     }
 
-    pub fn connect_elm(mac: &str) -> Result<(Box<dyn ElmTransport>, String), String> {
+    pub fn connect_elm(
+        svc: &Arc<ObdService>,
+        mac: &str,
+    ) -> Result<(Box<dyn ElmTransport>, String), String> {
         let conn = Connection::new_system().map_err(|e| format!("D-Bus: {e}"))?;
         let dev_path = format!("/org/bluez/hci0/dev_{}", mac.replace(':', "_"));
-        let dev = conn.with_proxy("org.bluez", &dev_path, Duration::from_secs(10));
+        let dev = conn.with_proxy("org.bluez", &dev_path, Duration::from_secs(12));
 
-        // If not in BlueZ cache yet, run a brief discovery so BlueZ sees the advertisement.
-        let connect_res: Result<(), _> = dev.method_call("org.bluez.Device1", "Connect", ());
-        if connect_res.is_err() {
-            let adapter = conn.with_proxy("org.bluez", "/org/bluez/hci0", Duration::from_secs(5));
-            let _: Result<(), _> = adapter.method_call("org.bluez.Adapter1", "StartDiscovery", ());
-            std::thread::sleep(Duration::from_secs(3));
-            let _: Result<(), _> = adapter.method_call("org.bluez.Adapter1", "StopDiscovery", ());
-            let retry: Result<(), _> = dev.method_call("org.bluez.Device1", "Connect", ());
-            retry.map_err(|e| format!("Bluetooth connect ({mac}): {e}"))?;
+        push_log(svc, format!("BT: connexion à {mac}..."));
+        let _ = dev.set("org.bluez.Device1", "Trusted", true);
+
+        let mut connect_res: Result<(), dbus::Error> =
+            dev.method_call("org.bluez.Device1", "Connect", ());
+        if let Err(ref e1) = connect_res {
+            push_log(svc, format!("BT 1er essai: {e1} -> scan LE..."));
+            run_discovery(&conn, "le", Duration::from_secs(4));
+            let _ = dev.set("org.bluez.Device1", "Trusted", true);
+            connect_res = dev.method_call("org.bluez.Device1", "Connect", ());
+            if let Err(ref e2) = connect_res {
+                push_log(svc, format!("BT 2e essai: {e2}"));
+                std::thread::sleep(Duration::from_millis(600));
+                connect_res = dev.method_call("org.bluez.Device1", "Connect", ());
+            }
         }
+        connect_res.map_err(|e| format!("Bluetooth connect ({mac}): {e}"))?;
 
-        // Wait up to 4 s for GATT ServicesResolved (BLE).
+        // Wait up to 8 s for GATT ServicesResolved (BLE).
         let mut dev_name = mac.to_string();
-        for _ in 0..20 {
+        let mut resolved = false;
+        for _ in 0..40 {
             let root = conn.with_proxy("org.bluez", "/", Duration::from_secs(3));
             if let Ok(objs) = root.get_managed_objects() {
                 if let Some(ifaces) = objs.get(&dbus::Path::new(&dev_path).unwrap()) {
@@ -1740,6 +1998,7 @@ mod bt_linux {
                             dev_name = n;
                         }
                         if prop_bool(props, "ServicesResolved") {
+                            resolved = true;
                             break;
                         }
                     }
@@ -1747,27 +2006,55 @@ mod bt_linux {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+        push_log(svc, format!("BT lié ({dev_name}), GATT resolved={resolved}"));
 
         if let Some((notify_path, write_path, write_without_resp)) = find_ble_chars(&conn, &dev_path)? {
+            push_log(
+                svc,
+                format!("BLE GATT trouvé (cmd_no_resp={write_without_resp}) -> StartNotify"),
+            );
+            let rx_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+            let rx_cb = Arc::clone(&rx_buf);
+            let rule = MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged")
+                .with_path(notify_path.clone());
+            let token = conn
+                .add_match(rule, move |sig: PropertiesPropertiesChanged, _, _| {
+                    if sig.interface_name == "org.bluez.GattCharacteristic1" {
+                        if let Some(val) = sig.changed_properties.get("Value") {
+                            if let Some(iter) = val.0.as_iter() {
+                                let mut guard = rx_cb.lock().unwrap();
+                                for item in iter {
+                                    if let Some(b) = item.as_u64() {
+                                        guard.push(b as u8);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    true
+                })
+                .map_err(|e| format!("BLE match: {e}"))?;
+
             let nproxy = conn.with_proxy("org.bluez", &notify_path, Duration::from_secs(5));
-            let opts: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
-            let (fd, _mtu): (OwnedFd, u16) = nproxy
-                .method_call("org.bluez.GattCharacteristic1", "AcquireNotify", (opts,))
-                .map_err(|e| format!("BLE AcquireNotify: {e}"))?;
-            set_nonblocking(fd.as_raw_fd());
-            let notify_file = fs::File::from(fd);
+            let start_res: Result<(), _> =
+                nproxy.method_call("org.bluez.GattCharacteristic1", "StartNotify", ());
+            start_res.map_err(|e| format!("BLE StartNotify: {e}"))?;
+
             return Ok((
-                Box::new(BleTransport {
+                Box::new(BleNotifyTransport {
                     conn,
+                    notify_path,
                     write_path,
                     write_without_resp,
-                    notify_file,
+                    rx_buf,
+                    _match_token: token,
                 }),
                 dev_name,
             ));
         }
 
         // Fallback to Classic SPP RFCOMM (e.g., "Android-Vlink").
+        push_log(svc, "Pas de GATT BLE -> tentative RFCOMM SPP...");
         let rfcomm = connect_rfcomm(mac)?;
         Ok((rfcomm, dev_name))
     }
