@@ -149,6 +149,29 @@ impl DashboardController {
         (800, 480)
     }
 
+    /// Safe-area insets (per side, in logical 800x480 px) matching CarPlay's CP_VIEW_AREA margins.
+    /// Reads columns 3 & 4 (margin_w, margin_h) from video.sock.display (e.g. "800 480 0 32" -> (0, 16)).
+    pub fn safe_insets(&self) -> (f32, f32) {
+        if let Some(raw) = Self::read_trimmed(&self.paths.bridge.join("video.sock.display")) {
+            let parts: Vec<&str> = raw.split_whitespace().collect();
+            if parts.len() >= 4 {
+                if let (Ok(w), Ok(h), Ok(mw), Ok(mh)) = (
+                    parts[0].parse::<f32>(),
+                    parts[1].parse::<f32>(),
+                    parts[2].parse::<f32>(),
+                    parts[3].parse::<f32>(),
+                ) {
+                    if w > 0.0 && h > 0.0 {
+                        let ix = ((mw * 0.5) * (800.0 / w)).clamp(0.0, 100.0);
+                        let iy = ((mh * 0.5) * (480.0 / h)).clamp(0.0, 80.0);
+                        return (ix, iy);
+                    }
+                }
+            }
+        }
+        (0.0, 0.0)
+    }
+
     pub fn obd_hud(&self) -> ObdHud {
         let Some(raw) = Self::read_trimmed(&self.paths.bridge.join("obd.json")) else {
             return ObdHud {

@@ -66,9 +66,12 @@ fn load_logo_image(settings_dir: &Path) -> Option<slint::Image> {
 
 fn sync_ui(ui: &DashboardWindow, ctrl: &DashboardController, waiting: bool) {
     let tel = ctrl.telemetry();
+    let (inset_x, inset_y) = ctrl.safe_insets();
     ui.set_waiting_mode(waiting);
     ui.set_active_page(ctrl.active_page.clone().into());
     ui.set_day_mode(ctrl.effective_day_mode(&tel));
+    ui.set_safe_inset_x(inset_x);
+    ui.set_safe_inset_y(inset_y);
 
     ui.set_oem_name(ctrl.oem_name().into());
     ui.set_version_text(tel.version.into());
@@ -703,17 +706,26 @@ pub fn render_screenshots(out_dir: &Path, logo_path: Option<&Path>) -> Result<()
 }
 
 /// Interactive 800x480 native desktop preview window (macOS / Linux desktop).
+/// Polls `/tmp/carfluxoid-preview-settings/obd.json` & `video.sock.display` at 10 Hz
+/// so `scripts/obd-sim.py` can drive the real Uconnect OBD Sport screen interactively.
 #[cfg(feature = "preview")]
 pub fn run_preview(logo_path: Option<&Path>) -> Result<(), String> {
     let tmp = std::env::temp_dir().join("carfluxoid-preview-settings");
     let _ = fs::create_dir_all(&tmp);
+    let disp_path = tmp.join("video.sock.display");
+    if !disp_path.exists() {
+        // Default to Fiat Tipo Uconnect 7" geometry with safe margins (0, 32).
+        let _ = fs::write(&disp_path, "800 480 0 32\n");
+    }
     let paths = Paths {
         settings: tmp.clone(),
         assets: Path::new("assets/waiting").to_path_buf(),
         runtime: tmp.clone(),
         bridge: tmp,
     };
-    let ctrl = Rc::new(RefCell::new(DashboardController::new(paths, true)));
+    let mut initial_ctrl = DashboardController::new(paths, true);
+    initial_ctrl.active_page = "obd".into();
+    let ctrl = Rc::new(RefCell::new(initial_ctrl));
     let dirty = Rc::new(RefCell::new(false));
     let ui = DashboardWindow::new().map_err(|e| format!("DashboardWindow::new: {e}"))?;
 
@@ -732,6 +744,21 @@ pub fn run_preview(logo_path: Option<&Path>) -> Result<(), String> {
     wire_callbacks(&ui, ctrl.clone(), dirty);
     sync_ui(&ui, &ctrl.borrow(), false);
     ui.set_oem_name("Fiat".into());
+
+    let ui_weak = ui.as_weak();
+    let ctrl_poll = ctrl.clone();
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(100),
+        move || {
+            if let Some(w) = ui_weak.upgrade() {
+                sync_ui(&w, &ctrl_poll.borrow(), false);
+                w.set_oem_name("Fiat".into());
+            }
+        },
+    );
+
     ui.run().map_err(|e| format!("ui.run: {e}"))
 }
 

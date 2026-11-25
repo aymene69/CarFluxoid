@@ -350,12 +350,15 @@ export component DashboardWindow inherits Window {
     height: 480px;
     default-font-family: "Inter";
     title: "CarFluxoid";
-    background: Palette.bg;
+    background: (root.safe-inset-x > 0px || root.safe-inset-y > 0px) ? #000000 : Palette.bg;
 
     // Active surface & navigation
     in-out property <bool> waiting-mode: false;
-    in-out property <string> active-page: "home"; // home | settings | network | system | keyboard
+    in-out property <string> active-page: "home"; // home | obd | settings | network | system | keyboard
     in-out property <bool> day-mode: false;
+    // Safe-area insets matching CarPlay CP_VIEW_AREA margins (e.g. Uconnect 7": y=16px top/bottom)
+    in property <length> safe-inset-x: 0px;
+    in property <length> safe-inset-y: 0px;
 
     // Live telemetry & branding
     in property <string> oem-name: "Autoradio";
@@ -612,11 +615,19 @@ export component DashboardWindow inherits Window {
     }
 
     // =========================================================================
-    // MAIN AUTOMOTIVE SHELL (Left Rail + Top Bar + Active View)
+    // MAIN AUTOMOTIVE SHELL (Safe-area inset to match CarPlay view area)
     // =========================================================================
-    if !root.waiting-mode: HorizontalLayout {
-        width: 100%;
-        height: 100%;
+    if !root.waiting-mode: Rectangle {
+        x: root.safe-inset-x;
+        y: root.safe-inset-y;
+        width: root.width - root.safe-inset-x * 2;
+        height: root.height - root.safe-inset-y * 2;
+        background: Palette.bg;
+        clip: true;
+
+        HorizontalLayout {
+            width: 100%;
+            height: 100%;
 
         // ---------------------------------------------------------------------
         // LEFT NAVIGATION RAIL (86px) — CarPlay / OEM style dock
@@ -689,19 +700,19 @@ export component DashboardWindow inherits Window {
         }
 
         // ---------------------------------------------------------------------
-        // RIGHT WORKSPACE (714 x 480)
-        // ---------------------------------------------------------------------
-        VerticalLayout {
-            horizontal-stretch: 1;
-            padding-left: 20px;
-            padding-right: 20px;
-            padding-top: 14px;
-            padding-bottom: 14px;
-            spacing: 12px;
+            // RIGHT WORKSPACE (714 x 480 minus safe-area insets)
+            // ---------------------------------------------------------------------
+            VerticalLayout {
+                horizontal-stretch: 1;
+                padding-left: 18px;
+                padding-right: 18px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: 10px;
 
-            // TOP HEADER BAR
-            HorizontalLayout {
-                height: 44px;
+                // TOP HEADER BAR
+                HorizontalLayout {
+                    height: 38px;
                 spacing: 10px;
                 alignment: space-between;
 
@@ -1214,32 +1225,32 @@ export component DashboardWindow inherits Window {
 
                 // TOP SPORT TACHOMETER + GEAR + SPEED + POWER
                 Rectangle {
-                    height: 118px;
-                    border-radius: 16px;
+                    height: 106px;
+                    border-radius: 14px;
                     background: Palette.surface;
                     border-width: 1px;
                     border-color: Palette.border;
 
                     HorizontalLayout {
-                        padding: 14px;
-                        spacing: 16px;
+                        padding: 12px;
+                        spacing: 14px;
 
                         // Gear indicator badge
                         Rectangle {
-                            width: 82px;
-                            height: 88px;
-                            border-radius: 14px;
+                            width: 78px;
+                            height: 80px;
+                            border-radius: 12px;
                             background: Palette.accent-bg;
                             border-width: 1.5px;
                             border-color: Palette.accent-border;
 
                             VerticalLayout {
                                 alignment: center;
-                                spacing: 2px;
+                                spacing: 1px;
 
                                 Text {
                                     text: "RAPPORT";
-                                    font-size: 10px;
+                                    font-size: 9px;
                                     font-weight: 700;
                                     color: Palette.muted;
                                     horizontal-alignment: center;
@@ -1247,7 +1258,7 @@ export component DashboardWindow inherits Window {
 
                                 Text {
                                     text: root.obd-gear;
-                                    font-size: 40px;
+                                    font-size: 36px;
                                     font-weight: 700;
                                     color: Palette.accent;
                                     horizontal-alignment: center;
@@ -1441,7 +1452,7 @@ export component DashboardWindow inherits Window {
 
                 // BOTTOM COMPACT STATUS ROW
                 HorizontalLayout {
-                    height: 82px;
+                    height: 74px;
                     spacing: 12px;
 
                     TelemetryCard {
@@ -1699,6 +1710,7 @@ export component DashboardWindow inherits Window {
                     KeyCap { horizontal-stretch: 20; accent: true; label: "Enregistrer"; clicked => { root.key-save(); } }
                 }
             }
+        }
         }
     }
 }

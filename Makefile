@@ -10,7 +10,7 @@ DOCKER_RUN = docker run --rm --platform linux/arm64 \
 	-e OPENSSL_NO_VENDOR=1 \
 	$(IMAGE)
 
-.PHONY: help prepare image build test tls os-image os deploy os-update backup restore logs
+.PHONY: help prepare image build test tls os-image os deploy os-update backup restore logs obd-sim
 
 help:
 	@echo "CarFluxoid — Raspberry Pi Zero 2 W Wireless CarPlay-to-Android-Auto Bridge"
@@ -73,3 +73,6 @@ logs:
 	@mkdir -p local/raspberrypi
 	ssh $(HOST) 'if [ "$$(id -u)" -eq 0 ]; then cat /var/lib/carfluxoid/car-diag.prev.log; else sudo cat /var/lib/carfluxoid/car-diag.prev.log; fi' > local/raspberrypi/car-diag-last.log
 	@ls -lh local/raspberrypi/car-diag-last.log
+
+obd-sim:
+	python3 scripts/obd-sim.py
