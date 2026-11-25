@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -443,6 +444,13 @@ def local_ip() -> str:
 
 
 def main():
+    rpi_url = None
+    for i, arg in enumerate(sys.argv[1:], start=1):
+        if arg == "--rpi" and i + 1 < len(sys.argv):
+            rpi_url = sys.argv[i + 1].rstrip("/")
+        elif arg.startswith("--rpi="):
+            rpi_url = arg.split("=", 1)[1].rstrip("/")
+
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     write_atomic(DISPLAY_FILE, "800 480 0 32\n")
 
@@ -459,6 +467,33 @@ def main():
             time.sleep(0.08)
 
     threading.Thread(target=physics_loop, daemon=True).start()
+
+    if rpi_url:
+        def rpi_push_loop():
+            endpoint = f"{rpi_url}/api/obd/sim"
+            while not stop_event.is_set():
+                try:
+                    data = json.dumps(latest[0]).encode("utf-8")
+                    req = urllib.request.Request(
+                        endpoint,
+                        data=data,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=1.5):
+                        pass
+                except Exception:
+                    pass
+                time.sleep(0.20)
+            try:
+                req = urllib.request.Request(f"{rpi_url}/api/obd/sim/stop", method="POST")
+                with urllib.request.urlopen(req, timeout=1.5):
+                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=rpi_push_loop, daemon=True).start()
+        print(f"Injection directe RPi   : {rpi_url}/api/obd/sim")
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format, *args):

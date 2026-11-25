@@ -238,6 +238,7 @@ struct ObdService {
     live: Mutex<ObdLiveSnapshot>,
     devices: Mutex<Vec<BtDeviceInfo>>,
     pending_cmd: Mutex<Option<ObdCommand>>,
+    sim_until: Mutex<Option<Instant>>,
 }
 
 static SERVICE: OnceLock<Arc<ObdService>> = OnceLock::new();
@@ -259,9 +260,22 @@ fn service() -> Arc<ObdService> {
                 }),
                 devices: Mutex::new(Vec::new()),
                 pending_cmd: Mutex::new(None),
+                sim_until: Mutex::new(None),
             })
         })
         .clone()
+}
+
+fn is_sim_active(svc: &ObdService) -> bool {
+    let mut guard = svc.sim_until.lock().unwrap();
+    match *guard {
+        Some(until) if Instant::now() < until => true,
+        Some(_) => {
+            *guard = None;
+            false
+        }
+        None => false,
+    }
 }
 
 fn push_log(svc: &Arc<ObdService>, msg: impl Into<String>) {
@@ -1125,6 +1139,108 @@ pub fn request_finish_trip() {
     *svc.pending_cmd.lock().unwrap() = Some(ObdCommand::FinishTrip);
 }
 
+#[derive(Deserialize)]
+struct SimPayload {
+    rpm: Option<f64>,
+    speed_kmh: Option<f64>,
+    coolant_c: Option<f64>,
+    intake_c: Option<f64>,
+    load_pct: Option<f64>,
+    throttle_pct: Option<f64>,
+    pedal_pct: Option<f64>,
+    map_kpa: Option<f64>,
+    baro_kpa: Option<f64>,
+    boost_bar: Option<f64>,
+    maf_gps: Option<f64>,
+    rail_bar: Option<f64>,
+    fuel_level_pct: Option<f64>,
+    fuel_rate_lph: Option<f64>,
+    fuel_l_per_100km: Option<f64>,
+    battery_v: Option<f64>,
+    egr_pct: Option<f64>,
+    egr_error_pct: Option<f64>,
+    lambda: Option<f64>,
+    dpf_temp_c: Option<f64>,
+    dpf_soot_pct: Option<f64>,
+    dpf_diff_kpa: Option<f64>,
+    dpf_regen_active: Option<bool>,
+    gear: Option<String>,
+    power_hp: Option<f64>,
+    torque_nm: Option<f64>,
+    dist_since_clear_km: Option<u32>,
+    warmups_since_clear: Option<u16>,
+}
+
+pub fn apply_simulated_json(body: &[u8]) -> Result<String, String> {
+    if body.len() > 16 * 1024 {
+        return Err("Payload simulation trop grand.".into());
+    }
+    let sim: SimPayload = serde_json::from_slice(body).map_err(|e| format!("JSON invalide: {e}"))?;
+    let svc = service();
+    *svc.sim_until.lock().unwrap() = Some(Instant::now() + Duration::from_secs(15));
+    let mut live = svc.live.lock().unwrap();
+    live.connected = true;
+    live.state = "simulated".into();
+    live.error = None;
+    live.adapter_name = Some("Simulateur OBD-II".into());
+    live.transport = "sim".into();
+    live.elm_version = Some("CarFluxoid Virtual ELM327".into());
+    live.protocol = Some("AUTO, ISO 15765-4 (SIM)".into());
+    if sim.rpm.is_some() { live.rpm = sim.rpm; }
+    if sim.speed_kmh.is_some() { live.speed_kmh = sim.speed_kmh; }
+    if sim.coolant_c.is_some() { live.coolant_c = sim.coolant_c; }
+    if sim.intake_c.is_some() { live.intake_c = sim.intake_c; }
+    if sim.load_pct.is_some() { live.load_pct = sim.load_pct; }
+    if sim.throttle_pct.is_some() { live.throttle_pct = sim.throttle_pct; }
+    if sim.pedal_pct.is_some() { live.pedal_pct = sim.pedal_pct; }
+    if sim.map_kpa.is_some() { live.map_kpa = sim.map_kpa; }
+    if sim.baro_kpa.is_some() { live.baro_kpa = sim.baro_kpa; }
+    if sim.boost_bar.is_some() { live.boost_bar = sim.boost_bar; }
+    if sim.maf_gps.is_some() { live.maf_gps = sim.maf_gps; }
+    if sim.rail_bar.is_some() { live.rail_bar = sim.rail_bar; }
+    if sim.fuel_level_pct.is_some() { live.fuel_level_pct = sim.fuel_level_pct; }
+    if sim.fuel_rate_lph.is_some() { live.fuel_rate_lph = sim.fuel_rate_lph; }
+    if sim.fuel_l_per_100km.is_some() { live.fuel_l_per_100km = sim.fuel_l_per_100km; }
+    if sim.battery_v.is_some() { live.battery_v = sim.battery_v; }
+    if sim.egr_pct.is_some() { live.egr_pct = sim.egr_pct; }
+    if sim.egr_error_pct.is_some() { live.egr_error_pct = sim.egr_error_pct; }
+    if sim.lambda.is_some() { live.lambda = sim.lambda; }
+    if sim.dpf_temp_c.is_some() { live.dpf_temp_c = sim.dpf_temp_c; }
+    if sim.dpf_soot_pct.is_some() { live.dpf_soot_pct = sim.dpf_soot_pct; }
+    if sim.dpf_diff_kpa.is_some() { live.dpf_diff_kpa = sim.dpf_diff_kpa; }
+    if let Some(regen) = sim.dpf_regen_active { live.dpf_regen_active = regen; }
+    if sim.gear.is_some() { live.gear = sim.gear; }
+    if sim.power_hp.is_some() { live.power_hp = sim.power_hp; }
+    if sim.torque_nm.is_some() { live.torque_nm = sim.torque_nm; }
+    if sim.dist_since_clear_km.is_some() { live.dist_since_clear_km = sim.dist_since_clear_km; }
+    if sim.warmups_since_clear.is_some() { live.warmups_since_clear = sim.warmups_since_clear; }
+    live.updated_at = now_unix_secs();
+    write_dashboard_obd_snapshot(&live);
+    serde_json::to_string(&*live).map_err(|e| e.to_string())
+}
+
+pub fn stop_simulation() -> String {
+    let svc = service();
+    *svc.sim_until.lock().unwrap() = None;
+    let mut live = svc.live.lock().unwrap();
+    let has_mac = live.adapter_mac.is_some();
+    live.connected = false;
+    live.state = if has_mac { "connecting".into() } else { "disconnected".into() };
+    live.adapter_name = None;
+    live.transport = "none".into();
+    live.error = None;
+    live.rpm = None;
+    live.speed_kmh = None;
+    live.gear = None;
+    live.boost_bar = None;
+    live.power_hp = None;
+    live.torque_nm = None;
+    live.dpf_regen_active = false;
+    live.updated_at = now_unix_secs();
+    write_dashboard_obd_snapshot(&live);
+    serde_json::to_string(&*live).unwrap_or_else(|_| "{}".into())
+}
+
 pub fn sync_system_time(unix_secs: u64) -> Result<u64, String> {
     if !(1_700_000_000..=4_102_444_800).contains(&unix_secs) {
         return Err("Timestamp Unix hors plage.".into());
@@ -1180,6 +1296,10 @@ fn obd_worker_loop(svc: Arc<ObdService>) {
     let mut last_reconnect = Instant::now() - Duration::from_secs(60);
 
     loop {
+        if is_sim_active(&svc) {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
         // Always update GPS & trip logger even when no OBD adapter is paired/connected.
         let gps = read_car_gps();
         {
@@ -1477,6 +1597,10 @@ fn run_elm_session(
     let mut consec_errors = 0u32;
 
     loop {
+        if is_sim_active(svc) {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
         if let Some(cmd) = svc.pending_cmd.lock().unwrap().take() {
             match cmd {
                 ObdCommand::Disconnect => return,

@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>CarFluxoid · Simulateur OBD-II Live (RPi)</title>
+<style>
+  :root{
+    color-scheme:dark;
+    --bg:#080d16;--surface:#121c2e;--alt:#172338;--border:rgba(255,255,255,0.09);
+    --accent:#14d4b4;--blue:#38bdf8;--amber:#f59e0b;--red:#f87171;--muted:#8ea2be;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    margin:0;padding:16px 14px 36px;max-width:600px;margin-inline:auto;
+    background:var(--bg);color:#f4f7fc;
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",system-ui,sans-serif;
+    touch-action:manipulation;
+  }
+  .top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}
+  h1{font-size:20px;margin:0;color:var(--accent)}
+  .back{
+    color:#8edaff;text-decoration:none;font-size:13px;font-weight:600;
+    padding:6px 10px;border-radius:10px;background:var(--surface);border:1px solid var(--border);
+  }
+  .sub{font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.4}
+  .card{
+    background:var(--surface);border:1px solid var(--border);
+    border-radius:16px;padding:14px;margin-bottom:12px;
+  }
+  .hud{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center}
+  .hud .k{font-size:10px;text-transform:uppercase;color:var(--muted);letter-spacing:.5px}
+  .hud .v{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;margin-top:2px}
+  .v.accent{color:var(--accent)}.v.blue{color:var(--blue)}.v.amber{color:var(--amber)}
+  .hint{font-size:11px;color:#7f93b0;text-align:center;margin-top:8px;font-variant-numeric:tabular-nums}
+  .pedals{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+  .pedal{
+    padding:18px 10px;border-radius:14px;border:1px solid var(--border);font-weight:800;font-size:15px;
+    cursor:pointer;user-select:none;-webkit-user-select:none;transition:transform .05s;
+  }
+  .pedal:active,.pedal.on{transform:scale(0.97)}
+  .gas{background:rgba(20,212,180,0.16);color:var(--accent);border-color:rgba(20,212,180,0.45)}
+  .gas.on{background:var(--accent);color:#041c1a}
+  .brk{background:rgba(248,113,113,0.16);color:var(--red);border-color:rgba(248,113,113,0.45)}
+  .brk.on{background:var(--red);color:#1c0404}
+  .row{display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px;font-size:12px;color:var(--muted)}
+  .row strong{color:#fff;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;accent-color:var(--accent);height:28px;cursor:pointer}
+  .gears{display:flex;gap:6px;flex-wrap:wrap}
+  .gbtn{
+    flex:1;min-width:38px;padding:10px 0;border-radius:10px;border:1px solid var(--border);
+    background:var(--alt);color:#fff;font-weight:700;font-size:14px;cursor:pointer;
+  }
+  .gbtn.active{background:var(--accent);color:#041c1a;border-color:var(--accent)}
+  .toggles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .tbtn{
+    padding:11px 10px;border-radius:12px;border:1px solid var(--border);
+    background:var(--alt);color:var(--muted);font-weight:700;font-size:12px;cursor:pointer;
+  }
+  .tbtn.on{background:rgba(20,212,180,0.22);color:var(--accent);border-color:var(--accent)}
+  .tbtn.warn.on{background:rgba(245,158,11,0.24);color:var(--amber);border-color:var(--amber)}
+  .tbtn.danger{background:rgba(248,113,113,0.12);color:var(--red);border-color:rgba(248,113,113,0.35)}
+  .rates{display:flex;gap:6px;margin-top:8px}
+  .rbtn{
+    flex:1;padding:8px 0;border-radius:10px;border:1px solid var(--border);
+    background:var(--alt);color:var(--muted);font-weight:700;font-size:12px;cursor:pointer;
+  }
+  .rbtn.active{background:rgba(56,189,248,0.22);color:var(--blue);border-color:var(--blue)}
+  .pill{
+    display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;
+    background:rgba(20,212,180,0.16);color:var(--accent);border:1px solid rgba(20,212,180,0.35);
+  }
+  .pill.off{background:rgba(142,162,190,0.12);color:var(--muted);border-color:var(--border)}
+</style>
+</head>
+<body>
+  <div class="top">
+    <h1>Simulateur OBD-II Live</h1>
+    <a class="back" href="/">← Réglages</a>
+  </div>
+  <div class="sub">
+    Injecte en direct dans le Raspberry Pi → écran Uconnect <strong>OBD Sport</strong> + App iPhone.<br>
+    <span id="liveBadge" class="pill">● Envoi actif</span>
+    <span id="rttInfo" style="margin-left:8px;font-family:ui-monospace,Menlo,monospace">— ms</span>
+  </div>
+
+  <div class="card">
+    <div class="hud">
+      <div><div class="k">Vitesse</div><div class="v blue" id="spd">0</div></div>
+      <div><div class="k">Régime</div><div class="v" id="rpm">820</div></div>
+      <div><div class="k">Rapport</div><div class="v accent" id="gear">N</div></div>
+      <div><div class="k">Turbo</div><div class="v amber" id="boost">+0.00</div></div>
+    </div>
+    <div class="hint" id="subHud">0 ch · 0 Nm · λ 5.00 · Conso —</div>
+  </div>
+
+  <div class="card">
+    <div class="pedals">
+      <button class="pedal gas" id="btnGas" type="button">⚡ ACCÉLÉRER</button>
+      <button class="pedal brk" id="btnBrk" type="button">🛑 FREINER</button>
+    </div>
+    <div class="toggles" style="margin-bottom:10px">
+      <button class="tbtn" id="bDemo" type="button">▶ Auto-Démo (V1→V6)</button>
+      <button class="tbtn danger" id="bStop" type="button">⏹ Stop → Vgate réel</button>
+    </div>
+    <div class="row"><span>Accélérateur maintenu</span><strong id="vThr">0 %</strong></div>
+    <input type="range" id="sThr" min="0" max="100" value="0">
+    <div class="row"><span>Carburant PID 012F (+20% = test auto-plein)</span><strong id="vFuel">64 %</strong></div>
+    <input type="range" id="sFuel" min="0" max="100" value="64">
+    <div class="row"><span>Température eau moteur</span><strong id="vCool">88 °C</strong></div>
+    <input type="range" id="sCool" min="20" max="110" value="88">
+  </div>
+
+  <div class="card">
+    <div class="row"><span>Boîte 6 vitesses MultiJet</span><strong id="vGearMode">Auto</strong></div>
+    <div class="gears" id="gearBar">
+      <button class="gbtn active" data-g="auto" type="button">Auto</button>
+      <button class="gbtn" data-g="0" type="button">N</button>
+      <button class="gbtn" data-g="1" type="button">1</button>
+      <button class="gbtn" data-g="2" type="button">2</button>
+      <button class="gbtn" data-g="3" type="button">3</button>
+      <button class="gbtn" data-g="4" type="button">4</button>
+      <button class="gbtn" data-g="5" type="button">5</button>
+      <button class="gbtn" data-g="6" type="button">6</button>
+    </div>
+    <div class="toggles" style="margin-top:10px">
+      <button class="tbtn warn" id="bRegen" type="button">🔥 Régén FAP : OFF</button>
+      <button class="tbtn" id="bRefuel" type="button">⛽ Simuler +25% plein</button>
+    </div>
+    <div class="row" style="margin-top:10px"><span>Cadence d'envoi vers le Pi</span><strong id="vRate">5 Hz (200 ms)</strong></div>
+    <div class="rates" id="rateBar">
+      <button class="rbtn" data-ms="500" type="button">2 Hz</button>
+      <button class="rbtn active" data-ms="200" type="button">5 Hz</button>
+      <button class="rbtn" data-ms="125" type="button">8 Hz</button>
+    </div>
+    <div class="hint">Clavier Mac : ↑/Z Gaz · ↓/S Frein · 0-6 Rapport · Espace Stop</div>
+  </div>
+
+<script>
+const RATIOS={1:8.5,2:15.5,3:24.0,4:33.5,5:43.5,6:54.0};
+const st={
+  running:true,demo:false,demoT:0,
+  gasHeld:false,brkHeld:false,thrSlider:0,
+  autoGear:true,gear:0,speed:0,rpm:820,boost:0,
+  fuel:64,coolant:88,regen:false,rateMs:200,
+  lastTx:0,inFlight:false,rtt:0,txCount:0,txWindowStart:performance.now(),txHz:0
+};
+const $=id=>document.getElementById(id);
+
+function setHold(btn,key,on){
+  st[key]=on;
+  btn.classList.toggle('on',on);
+  if(on){st.running=true;if(st.demo){st.demo=false;syncDemoBtn();}}
+}
+function bindHold(btn,key){
+  btn.addEventListener('pointerdown',e=>{e.preventDefault();btn.setPointerCapture(e.pointerId);setHold(btn,key,true);});
+  btn.addEventListener('pointerup',e=>{e.preventDefault();setHold(btn,key,false);});
+  btn.addEventListener('pointercancel',()=>setHold(btn,key,false));
+}
+bindHold($('btnGas'),'gasHeld');
+bindHold($('btnBrk'),'brkHeld');
+
+function syncDemoBtn(){
+  $('bDemo').classList.toggle('on',st.demo);
+  $('bDemo').textContent=st.demo?'⏸ Auto-Démo : ACTIVE':'▶ Auto-Démo (V1→V6)';
+}
+$('bDemo').onclick=()=>{
+  st.demo=!st.demo;
+  st.demoT=0;
+  if(st.demo){st.running=true;st.autoGear=true;updateGearBtns();}
+  syncDemoBtn();
+};
+
+$('bStop').onclick=async()=>{
+  st.running=false;st.demo=false;st.gasHeld=false;st.brkHeld=false;st.thrSlider=0;$('sThr').value='0';$('vThr').textContent='0 %';
+  syncDemoBtn();
+  $('liveBadge').textContent='○ Arrêté (Vgate réel)';
+  $('liveBadge').classList.add('off');
+  try{await fetch('/api/obd/sim/stop',{method:'POST'});}catch{}
+};
+
+$('sThr').oninput=e=>{st.thrSlider=+e.target.value;$('vThr').textContent=st.thrSlider+' %';st.running=true;};
+$('sFuel').oninput=e=>{st.fuel=+e.target.value;$('vFuel').textContent=Math.round(st.fuel)+' %';st.running=true;};
+$('sCool').oninput=e=>{st.coolant=+e.target.value;$('vCool').textContent=st.coolant+' °C';st.running=true;};
+$('bRegen').onclick=()=>{
+  st.regen=!st.regen;st.running=true;
+  $('bRegen').classList.toggle('on',st.regen);
+  $('bRegen').textContent='🔥 Régén FAP : '+(st.regen?'ON (620 °C)':'OFF');
+};
+$('bRefuel').onclick=()=>{
+  st.fuel=Math.min(100,st.fuel+25);
+  $('sFuel').value=String(Math.round(st.fuel));
+  $('vFuel').textContent=Math.round(st.fuel)+' %';
+  st.running=true;
+};
+
+function updateGearBtns(){
+  document.querySelectorAll('#gearBar .gbtn').forEach(b=>{
+    const v=b.dataset.g;
+    b.classList.toggle('active',(st.autoGear&&v==='auto')||(!st.autoGear&&+v===st.gear));
+  });
+  $('vGearMode').textContent=st.autoGear?'Auto':(st.gear===0?'Neutre':'Manuel V'+st.gear);
+}
+document.querySelectorAll('#gearBar .gbtn').forEach(b=>b.onclick=()=>{
+  st.running=true;
+  if(b.dataset.g==='auto'){st.autoGear=true;}
+  else{st.autoGear=false;st.gear=+b.dataset.g;}
+  updateGearBtns();
+});
+
+document.querySelectorAll('#rateBar .rbtn').forEach(b=>b.onclick=()=>{
+  st.rateMs=+b.dataset.ms;
+  document.querySelectorAll('#rateBar .rbtn').forEach(x=>x.classList.toggle('active',x===b));
+  $('vRate').textContent=Math.round(1000/st.rateMs)+' Hz ('+st.rateMs+' ms)';
+});
+
+window.addEventListener('keydown',e=>{
+  if(e.key==='ArrowUp'||e.key==='z'||e.key==='Z'){setHold($('btnGas'),'gasHeld',true);}
+  if(e.key==='ArrowDown'||e.key==='s'||e.key==='S'){setHold($('btnBrk'),'brkHeld',true);}
+  if(e.key===' '){st.speed=0;st.rpm=820;st.gear=0;st.thrSlider=0;$('sThr').value='0';$('vThr').textContent='0 %';}
+  if(e.key>='0'&&e.key<='6'){st.autoGear=false;st.gear=+e.key;updateGearBtns();}
+});
+window.addEventListener('keyup',e=>{
+  if(e.key==='ArrowUp'||e.key==='z'||e.key==='Z'){setHold($('btnGas'),'gasHeld',false);}
+  if(e.key==='ArrowDown'||e.key==='s'||e.key==='S'){setHold($('btnBrk'),'brkHeld',false);}
+});
+
+let lastStep=performance.now();
+function stepPhysics(){
+  const now=performance.now();
+  const dt=Math.min(0.1,(now-lastStep)/1000);
+  lastStep=now;
+
+  let thr=st.gasHeld?100:st.thrSlider;
+  let brk=st.brkHeld?100:0;
+
+  if(st.demo){
+    st.demoT=(st.demoT+dt)%26;
+    if(st.demoT<11){thr=78;brk=0;}           // Franche accélération V1 -> V5/V6
+    else if(st.demoT<15){thr=28;brk=0;}      // Stabilisé 110-130 km/h
+    else if(st.demoT<21){thr=0;brk=0;}       // Décélération + rétrogradages ▼
+    else if(st.demoT<24){thr=0;brk=65;}      // Freinage jusqu'à l'arrêt
+    else {thr=0;brk=0;}                      // Ralenti 2s
+  }
+
+  if(st.autoGear){
+    if(st.speed<1.5&&thr<5){st.gear=0;}
+    else if(st.gear===0&&thr>=5){st.gear=1;}
+    else if(st.gear>=1){
+      if(st.rpm>2850&&st.gear<6)st.gear++;
+      else if(st.rpm<1180&&st.gear>1)st.gear--;
+    }
+  }
+
+  let accel=0;
+  if(st.gear>0&&thr>0){
+    const factor=Math.max(0.28,1.15-st.gear*0.13);
+    accel=(thr/100)*15.5*factor;
+  }
+  const drag=0.00055*st.speed*st.speed+0.42;
+  const engBrk=(st.gear>0&&thr<2)?(2.2+0.025*st.speed):0;
+  const brkDecel=(brk/100)*28.0;
+  st.speed=Math.max(0,Math.min(205,st.speed+(accel-drag-engBrk-brkDecel)*dt));
+  if(st.speed<0.5&&thr<2){st.speed=0;if(st.autoGear)st.gear=0;}
+
+  let targetRpm=820;
+  if(st.gear===0){targetRpm=820+(thr/100)*2900;}
+  else{
+    targetRpm=Math.max(820,Math.min(4800,(st.speed/RATIOS[st.gear])*1000));
+    if(st.speed<6&&thr>5)targetRpm=Math.max(targetRpm,1050+(thr/100)*750);
+  }
+  st.rpm+=(targetRpm-st.rpm)*Math.min(1,dt*10);
+
+  const load=Math.max(8,Math.min(100,12+thr*0.88));
+  const targetBoost=(st.rpm>1350&&thr>10)?Math.min(1.65,(thr/100)*((st.rpm-1100)/2400)*1.55):0.02;
+  st.boost+=(targetBoost-st.boost)*Math.min(1,dt*6);
+
+  const baro=101.0;
+  const map=baro+st.boost*100;
+  const maf=Math.max(5.5,(st.rpm/1000)*(map/100)*12.5);
+  let lam=5.0,lph=0.65,l100=null;
+  if(st.speed>8&&thr<2){lam=9.5;lph=0;l100=0;}
+  else{
+    lam=Math.max(1.25,4.8-(load/100)*3.3);
+    const fuelGs=maf/(14.5*lam);
+    lph=(fuelGs*3600)/835.0;
+    l100=st.speed>=5?Math.min(35,(lph*100)/st.speed):null;
+  }
+  const rail=Math.max(260,Math.min(1650,280+(load/100)*1150+(st.rpm/4500)*260));
+  const egr=load>65?0:Math.max(0,Math.min(62,48-(load/100)*55));
+  const egrErr=Math.sin(now/1600)*2.1;
+  const hp=Math.max(0,Math.min(130,maf*0.92*(1.8/Math.max(1.2,lam))*0.78));
+  const nm=st.rpm>500?Math.min(340,(hp*7023)/st.rpm):0;
+  const dpfTemp=st.regen?624:(245+(load/100)*175);
+  const dpfSoot=st.regen?76:34;
+  const gearStr=st.gear===0?'N':String(st.gear);
+
+  // Update HUD locally at 30fps
+  $('spd').textContent=Math.round(st.speed);
+  $('rpm').textContent=Math.round(st.rpm);
+  let shiftArrow='';
+  if(st.gear>=1&&st.gear<=5&&st.rpm>=2450)shiftArrow=' ▲';
+  else if(st.gear>=2&&st.speed>=12&&st.rpm<=1250)shiftArrow=' ▼';
+  $('gear').textContent=gearStr+shiftArrow;
+  $('boost').textContent=(st.boost>=0?'+':'')+st.boost.toFixed(2);
+  $('subHud').textContent=`${Math.round(hp)} ch · ${Math.round(nm)} Nm · λ ${lam.toFixed(2)} · Conso ${l100===null?'—':l100.toFixed(1)+' L/100'}`;
+
+  if(st.running&&!st.inFlight&&now-st.lastTx>=st.rateMs){
+    st.lastTx=now;
+    st.inFlight=true;
+    const payload={
+      rpm:Math.round(st.rpm),
+      speed_kmh:Math.round(st.speed*10)/10,
+      coolant_c:st.coolant,
+      intake_c:24+Math.round(st.boost*16),
+      load_pct:Math.round(load*10)/10,
+      throttle_pct:Math.round(thr*10)/10,
+      pedal_pct:Math.round(thr*10)/10,
+      map_kpa:Math.round(map*10)/10,
+      baro_kpa:baro,
+      boost_bar:Math.round(st.boost*100)/100,
+      maf_gps:Math.round(maf*10)/10,
+      rail_bar:Math.round(rail),
+      fuel_level_pct:Math.round(st.fuel*10)/10,
+      fuel_rate_lph:Math.round(lph*100)/100,
+      fuel_l_per_100km:l100===null?null:Math.round(l100*10)/10,
+      battery_v:14.2,
+      egr_pct:Math.round(egr*10)/10,
+      egr_error_pct:Math.round(egrErr*10)/10,
+      lambda:Math.round(lam*100)/100,
+      dpf_temp_c:Math.round(dpfTemp),
+      dpf_soot_pct:dpfSoot,
+      dpf_diff_kpa:st.regen?18.4:Math.round((2.4+(maf/45)*6.2)*10)/10,
+      dpf_regen_active:st.regen,
+      gear:gearStr,
+      power_hp:Math.round(hp),
+      torque_nm:Math.round(nm),
+      dist_since_clear_km:1842,
+      warmups_since_clear:48
+    };
+    const t0=performance.now();
+    fetch('/api/obd/sim',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    }).then(r=>{
+      st.rtt=Math.round(performance.now()-t0);
+      st.txCount++;
+      const dtW=(performance.now()-st.txWindowStart)/1000;
+      if(dtW>=1.0){
+        st.txHz=(st.txCount/dtW).toFixed(1);
+        st.txCount=0;st.txWindowStart=performance.now();
+      }
+      if(r.ok){
+        $('liveBadge').textContent='● Envoi RPi actif';
+        $('liveBadge').classList.remove('off');
+        $('rttInfo').textContent=`${st.rtt} ms · ${st.txHz||'—'} Hz`;
+      }else{
+        $('liveBadge').textContent='⚠ Erreur HTTP '+r.status;
+      }
+    }).catch(()=>{
+      $('liveBadge').textContent='⚠ Pi hors ligne';
+      $('liveBadge').classList.add('off');
+    }).finally(()=>{st.inFlight=false;});
+  }
+}
+setInterval(stepPhysics,33);
+</script>
+</body>
+</html>

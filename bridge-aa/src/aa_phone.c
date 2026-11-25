@@ -1653,7 +1653,7 @@ int main(int argc,char **argv){
     if(sent&&(frames<=5||!(frames%50)))session_trace("TX video n=%d bytes=%zu unacked=%d src=waiting unit=%d",frames,waiting_unit_len[unit],unacked,unit);
    }
   }
-  fd_set set;FD_ZERO(&set);FD_SET(fd,&set);struct timeval wait={0,100000};
+  fd_set set;FD_ZERO(&set);FD_SET(fd,&set);struct timeval wait={0,screen==PROJECTION_MENU?40000:100000};
   if(!mbedtls_ssl_get_bytes_avail(&ssl)&&!left){
    if(!(usb_mode&&usb_pos<usb_len)){
     int max_fd=fd;if(control_fd>=0){FD_SET(control_fd,&set);if(control_fd>max_fd)max_fd=control_fd;}int video_fd=live_peer>=0?live_peer:live_listener;

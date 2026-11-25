@@ -493,7 +493,7 @@ pub fn run_daemon(paths: Paths) -> Result<(), String> {
     let server = UnixDatagram::bind(&endpoint)
         .map_err(|e| format!("bind {}: {e}", endpoint.display()))?;
     server
-        .set_read_timeout(Some(Duration::from_millis(250)))
+        .set_read_timeout(Some(Duration::from_millis(80)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
 
     let mut pixel_buf = Vec::new();
@@ -614,8 +614,8 @@ pub fn run_daemon(paths: Paths) -> Result<(), String> {
             }
         }
 
-        // Live dynamic refresh (~2 FPS) whenever the OBD Sport tab is open and obd.json updates
-        if ctrl.borrow().active_page == "obd" && last_obd_publish.elapsed() >= Duration::from_millis(450) {
+        // Live dynamic refresh (~5 FPS max) whenever the OBD Sport tab is open and obd.json updates
+        if ctrl.borrow().active_page == "obd" && last_obd_publish.elapsed() >= Duration::from_millis(180) {
             let cur_obd_mtime = fs::metadata(paths.bridge.join("obd.json"))
                 .and_then(|m| m.modified())
                 .ok();

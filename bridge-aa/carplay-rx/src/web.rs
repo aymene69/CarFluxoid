@@ -1,5 +1,6 @@
 use std::{io::{Read,Write},net::{TcpListener,TcpStream},path::{Path,PathBuf},process::{Command,Stdio},time::{Duration,SystemTime,UNIX_EPOCH}};
 const HTML:&str=include_str!("../assets/settings.html");
+const SIM_HTML:&str=include_str!("../assets/sim.html");
 const APP_VERSION:&str=match option_env!("CARFLUXOID_VERSION"){Some(v)=>v,None=>"dev"};
 const APP_BUILD:&str=match option_env!("CARFLUXOID_BUILD"){Some(b)=>b,None=>"local"};
 const MAX_OTA_BYTES:usize=24*1024*1024;
@@ -276,6 +277,7 @@ fn handle(mut s:TcpStream)->std::io::Result<()>{
  match(method,path){
   ("GET","/health")=>reply(&mut s,"200 OK","text/plain",b"CarFluxoid settings ready"),
   ("GET","/")=>reply(&mut s,"200 OK","text/html; charset=utf-8",HTML.as_bytes()),
+  ("GET","/sim")=>reply(&mut s,"200 OK","text/html; charset=utf-8",SIM_HTML.as_bytes()),
   ("GET","/name")=>reply(&mut s,"200 OK","text/plain; charset=utf-8",oem_name().as_bytes()),
   ("GET","/options")=>reply(&mut s,"200 OK","application/json",options_json().as_bytes()),
   ("GET","/diag")=>reply(&mut s,"200 OK","application/json; charset=utf-8",diag_json().as_bytes()),
@@ -315,6 +317,13 @@ fn handle(mut s:TcpStream)->std::io::Result<()>{
   ("POST","/api/obd/disconnect")=>{crate::obd::request_disconnect();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
   ("POST","/api/obd/dtc/read")=>{crate::obd::request_read_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
   ("POST","/api/obd/dtc/clear")=>{crate::obd::request_clear_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
+  ("POST","/api/obd/sim")=>{
+   match crate::obd::apply_simulated_json(body){
+    Ok(json)=>reply(&mut s,"200 OK","application/json; charset=utf-8",json.as_bytes()),
+    Err(err)=>reply(&mut s,"400 Bad Request","text/plain; charset=utf-8",err.as_bytes()),
+   }
+  },
+  ("POST","/api/obd/sim/stop")=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::stop_simulation().as_bytes()),
   ("POST","/api/time")=>{
    match extract_unix_body(body).ok_or_else(||"Timestamp unix invalide.".to_string()).and_then(crate::obd::sync_system_time){
     Ok(ts)=>reply(&mut s,"200 OK","application/json; charset=utf-8",format!(r#"{{"unix":{ts}}}"#).as_bytes()),
