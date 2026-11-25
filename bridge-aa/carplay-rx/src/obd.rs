@@ -202,6 +202,7 @@ enum ObdCommand {
     Disconnect,
     ReadDtcs,
     ClearDtcs,
+    FinishTrip,
 }
 
 struct ObdService {
@@ -528,12 +529,18 @@ fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 }
 
 fn read_car_gps() -> Option<GpsFix> {
-    let text = fs::read_to_string(bridge_dir().join("video.sock.gps.json")).ok()?;
-    let fix: GpsFix = serde_json::from_str(&text).ok()?;
-    let now = now_unix_secs();
-    if fix.ts > 0 && now > fix.ts && now - fix.ts > 10 {
-        return None;
+    let path = bridge_dir().join("video.sock.gps.json");
+    if let Ok(meta) = fs::metadata(&path) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(age) = modified.elapsed() {
+                if age > Duration::from_secs(12) {
+                    return None;
+                }
+            }
+        }
     }
+    let text = fs::read_to_string(&path).ok()?;
+    let fix: GpsFix = serde_json::from_str(&text).ok()?;
     if fix.lat == 0.0 && fix.lon == 0.0 {
         return None;
     }
@@ -557,9 +564,11 @@ fn write_dashboard_obd_snapshot(live: &ObdLiveSnapshot) {
 struct ActiveTrip {
     id: String,
     started_at: u64,
+    started_instant: Instant,
     last_active_at: Instant,
     last_sample_at: Instant,
     last_checkpoint_at: Instant,
+    was_running: bool,
     samples: Vec<TripSample>,
     distance_km: f64,
     fuel_used_l: f64,
@@ -586,9 +595,11 @@ impl ActiveTrip {
         Self {
             id: format!("trip-{now}"),
             started_at: now,
+            started_instant: now_i,
             last_active_at: now_i,
             last_sample_at: now_i - Duration::from_secs(2),
             last_checkpoint_at: now_i,
+            was_running: true,
             samples: Vec::with_capacity(512),
             distance_km: 0.0,
             fuel_used_l: 0.0,
@@ -607,6 +618,20 @@ impl ActiveTrip {
             last_gps: live.gps.as_ref().map(|g| (g.lat, g.lon)),
             has_gps: live.gps.is_some(),
             has_obd: live.connected,
+        }
+    }
+
+    /// If the trip began before the Pi clock was synced (1970 epoch), rebase its start
+    /// timestamp and file ID once real UTC time arrives from GPS or the iPhone app.
+    fn rebase_clock_if_needed(&mut self) {
+        let now = now_unix_secs();
+        if self.started_at < 1_700_000_000 && now >= 1_700_000_000 {
+            let old_path = trips_dir().join(format!("{}.json", self.id));
+            let real_start = now.saturating_sub(self.started_instant.elapsed().as_secs());
+            self.started_at = real_start;
+            self.id = format!("trip-{real_start}");
+            let _ = fs::remove_file(old_path);
+            self.save();
         }
     }
 
@@ -703,7 +728,7 @@ impl ActiveTrip {
         }
         self.last_speed_kmh = spd;
 
-        let elapsed_s = now_unix_secs().saturating_sub(self.started_at);
+        let elapsed_s = self.started_instant.elapsed().as_secs();
         if self.samples.len() < 14_400 {
             self.samples.push(TripSample {
                 t: elapsed_s,
@@ -724,8 +749,8 @@ impl ActiveTrip {
     }
 
     fn summary(&self) -> TripSummary {
-        let ended_at = now_unix_secs().max(self.started_at);
-        let duration_s = ended_at.saturating_sub(self.started_at).max(1);
+        let duration_s = self.started_instant.elapsed().as_secs().max(1);
+        let ended_at = self.started_at.saturating_add(duration_s);
         let avg_speed = if duration_s > 0 {
             self.distance_km / (duration_s as f64 / 3600.0)
         } else {
@@ -917,6 +942,33 @@ pub fn request_clear_dtcs() {
     *svc.pending_cmd.lock().unwrap() = Some(ObdCommand::ClearDtcs);
 }
 
+pub fn request_finish_trip() {
+    let svc = service();
+    *svc.pending_cmd.lock().unwrap() = Some(ObdCommand::FinishTrip);
+}
+
+pub fn sync_system_time(unix_secs: u64) -> Result<u64, String> {
+    if !(1_700_000_000..=4_102_444_800).contains(&unix_secs) {
+        return Err("Timestamp Unix hors plage.".into());
+    }
+    let cur = now_unix_secs();
+    if cur.abs_diff(unix_secs) >= 2 {
+        #[cfg(target_os = "linux")]
+        {
+            let ts = libc::timespec {
+                tv_sec: unix_secs as libc::time_t,
+                tv_nsec: 0,
+            };
+            let rc = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+            if rc == 0 {
+                let svc = service();
+                push_log(&svc, format!("Horloge Pi synchronisée ({unix_secs})"));
+            }
+        }
+    }
+    Ok(now_unix_secs())
+}
+
 pub fn scan_devices_sync() -> Result<String, String> {
     let svc = service();
     #[cfg(target_os = "linux")]
@@ -960,15 +1012,27 @@ fn obd_worker_loop(svc: Arc<ObdService>) {
             write_dashboard_obd_snapshot(&live);
         }
 
-        // Check pending disconnect/connect command.
+        // Check pending disconnect/connect/finish command.
         if let Some(cmd) = svc.pending_cmd.lock().unwrap().take() {
             match cmd {
                 ObdCommand::Disconnect => {
+                    if let Some(trip) = active_trip.take() {
+                        trip.save();
+                        svc.live.lock().unwrap().active_trip = None;
+                    }
                     continue;
                 }
                 ObdCommand::Connect(mac) => {
                     last_reconnect = Instant::now() - Duration::from_secs(60);
                     svc.live.lock().unwrap().adapter_mac = Some(mac);
+                }
+                ObdCommand::FinishTrip => {
+                    if let Some(mut trip) = active_trip.take() {
+                        trip.rebase_clock_if_needed();
+                        trip.save();
+                        svc.live.lock().unwrap().active_trip = None;
+                        push_log(&svc, format!("Trajet terminé manuellement ({:.2} km)", trip.distance_km));
+                    }
                 }
                 ObdCommand::ReadDtcs | ObdCommand::ClearDtcs => {}
             }
@@ -1051,14 +1115,22 @@ fn update_trip_state(active_trip: &mut Option<ActiveTrip>, live: &mut ObdLiveSna
     }
 
     if let Some(trip) = active_trip.as_mut() {
+        trip.rebase_clock_if_needed();
         trip.ingest(live);
-        if trip.last_checkpoint_at.elapsed() >= Duration::from_secs(30) {
+
+        // Save immediately if engine just stopped (so power loss never loses the end of a trip)
+        // or every 10 seconds during driving.
+        let just_stopped = trip.was_running && !moving_or_running;
+        trip.was_running = moving_or_running;
+        if just_stopped || trip.last_checkpoint_at.elapsed() >= Duration::from_secs(10) {
             trip.save();
             trip.last_checkpoint_at = Instant::now();
         }
         let summary = trip.summary();
         live.active_trip = Some(summary);
-        if trip.last_active_at.elapsed() >= Duration::from_secs(90) {
+
+        // Auto-finalize after 60 s with engine off & vehicle stopped (Start&Stop/red lights < 60 s stay intact).
+        if trip.last_active_at.elapsed() >= Duration::from_secs(60) {
             eprintln!("OBD_TRIP_END id={} km={:.2}", trip.id, trip.distance_km);
             trip.save();
             *active_trip = None;
@@ -1229,6 +1301,14 @@ fn run_elm_session(
                     std::thread::sleep(Duration::from_millis(400));
                     dtcs = read_all_dtcs(transport);
                     svc.live.lock().unwrap().dtcs = dtcs.clone();
+                }
+                ObdCommand::FinishTrip => {
+                    if let Some(mut trip) = active_trip.take() {
+                        trip.rebase_clock_if_needed();
+                        trip.save();
+                        svc.live.lock().unwrap().active_trip = None;
+                        push_log(svc, format!("Trajet terminé manuellement ({:.2} km)", trip.distance_km));
+                    }
                 }
             }
         }

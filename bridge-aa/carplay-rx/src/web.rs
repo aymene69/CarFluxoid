@@ -250,6 +250,12 @@ fn extract_mac_body(body:&[u8])->Option<String>{
  let v:serde_json::Value=serde_json::from_str(text).ok()?;
  v.get("mac")?.as_str().and_then(crate::obd::valid_mac)
 }
+fn extract_unix_body(body:&[u8])->Option<u64>{
+ let text=std::str::from_utf8(body).ok()?.trim();
+ if let Ok(n)=text.parse::<u64>(){return Some(n);}
+ let v:serde_json::Value=serde_json::from_str(text).ok()?;
+ v.get("unix")?.as_u64()
+}
 fn handle(mut s:TcpStream)->std::io::Result<()>{
  s.set_read_timeout(Some(Duration::from_secs(15)))?;s.set_write_timeout(Some(Duration::from_secs(15)))?;
  let mut data=Vec::new();let mut block=[0;4096];let end;
@@ -309,6 +315,13 @@ fn handle(mut s:TcpStream)->std::io::Result<()>{
   ("POST","/api/obd/disconnect")=>{crate::obd::request_disconnect();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
   ("POST","/api/obd/dtc/read")=>{crate::obd::request_read_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
   ("POST","/api/obd/dtc/clear")=>{crate::obd::request_clear_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
+  ("POST","/api/time")=>{
+   match extract_unix_body(body).ok_or_else(||"Timestamp unix invalide.".to_string()).and_then(crate::obd::sync_system_time){
+    Ok(ts)=>reply(&mut s,"200 OK","application/json; charset=utf-8",format!(r#"{{"unix":{ts}}}"#).as_bytes()),
+    Err(err)=>reply(&mut s,"400 Bad Request","text/plain; charset=utf-8",err.as_bytes()),
+   }
+  },
+  ("POST","/api/trips/finish")=>{crate::obd::request_finish_trip();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
   ("GET","/api/trips")=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::list_trips_json().as_bytes()),
   ("GET",p) if p.starts_with("/api/trips/")=>{
    let rest=&p["/api/trips/".len()..];

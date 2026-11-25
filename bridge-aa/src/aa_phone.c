@@ -922,14 +922,31 @@ static void write_gps_status(int32_t lat_e7,int32_t lon_e7,int32_t alt_e2,int ha
   }
  }
 }
+static void maybe_sync_clock_from_gps(uint64_t raw_ts){
+ uint64_t sec=0;
+ if(raw_ts>=1700000000000000ULL&&raw_ts<=4102444800000000ULL)sec=raw_ts/1000000ULL;
+ else if(raw_ts>=1700000000000ULL&&raw_ts<=4102444800000ULL)sec=raw_ts/1000ULL;
+ else if(raw_ts>=1700000000ULL&&raw_ts<=4102444800ULL)sec=raw_ts;
+ if(sec==0)return;
+ time_t cur=time(NULL);
+ if(cur<1700000000){
+  struct timespec ts;
+  ts.tv_sec=(time_t)sec;
+  ts.tv_nsec=0;
+  if(clock_settime(CLOCK_REALTIME,&ts)==0){
+   session_trace("AA_CLOCK_SYNC_GPS unix=%llu",(unsigned long long)sec);
+  }
+ }
+}
 static void parse_sensor_batch(const unsigned char *p,size_t n){
  size_t i=0,l;unsigned t;uint64_t v;const unsigned char *b;
  while(i<n){
   if(field(p,n,&i,&t,&v,&b,&l))return;
   if(!b)continue;
   if(t==1){
-   /* LocationData: 2=lat_e7, 3=lon_e7, 4=accuracy_e3, 5=altitude_e2, 6=speed_e3, 7=bearing_e6 */
+   /* LocationData: 1=timestamp, 2=lat_e7, 3=lon_e7, 4=accuracy_e3, 5=altitude_e2, 6=speed_e3, 7=bearing_e6 */
    int has_lat=0,has_lon=0;
+   uint64_t gps_ts=0;
    int32_t lat_e7=0,lon_e7=0,alt_e2=INT32_MIN,speed_e3=-1,bearing_e6=-1;
    uint32_t acc_e3=0,flags=0;
    size_t j=0,fl;unsigned ft;uint64_t fv;const unsigned char *fb;
@@ -937,6 +954,7 @@ static void parse_sensor_batch(const unsigned char *p,size_t n){
     if(field(b,l,&j,&ft,&fv,&fb,&fl))break;
     if(fb)continue;
     switch(ft){
+     case 1: gps_ts=fv;break;
      case 2: lat_e7=(int32_t)(uint32_t)fv;has_lat=1;break;
      case 3: lon_e7=(int32_t)(uint32_t)fv;has_lon=1;break;
      case 4: acc_e3=(uint32_t)fv;flags|=1u;break;
@@ -946,6 +964,7 @@ static void parse_sensor_batch(const unsigned char *p,size_t n){
      default: break;
     }
    }
+   if(gps_ts)maybe_sync_clock_from_gps(gps_ts);
    if(has_lat&&has_lon&&(lat_e7!=0||lon_e7!=0)&&
       lat_e7>=-900000000&&lat_e7<=900000000&&lon_e7>=-1800000000&&lon_e7<=1800000000){
     unsigned char report[29];

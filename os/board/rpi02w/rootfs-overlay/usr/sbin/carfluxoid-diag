@@ -33,6 +33,8 @@ snapshot() {
   grep -E 'CP_|BT_QUIET|AUDIO_|VIDEO_' /var/log/carfluxoid-radio.log 2>/dev/null | tail -n 80 || true
   echo "--- carfluxoid-radio (tail) ---"
   tail -n 40 /var/log/carfluxoid-radio.log 2>/dev/null || true
+  echo "--- carfluxoid-web (OBD) ---"
+  tail -n 60 /var/log/carfluxoid-web.log 2>/dev/null || true
   echo "--- session.log ---"
   if [ -r /run/carfluxoid/session.log ]; then
    lines=$(wc -l < /run/carfluxoid/session.log)
