@@ -45,14 +45,21 @@ pub struct Telemetry {
 #[derive(Clone, Debug)]
 pub struct ObdHud {
     pub connected: bool,
+    pub dpf_regen: bool,
     pub status: String,
     pub rpm: String,
+    pub rpm_ratio: f32,
     pub speed: String,
+    pub gear: String,
+    pub power_torque: String,
     pub boost: String,
+    pub boost_ratio: f32,
     pub coolant: String,
     pub fuel: String,
+    pub fuel_ratio: f32,
     pub battery: String,
     pub consumption: String,
+    pub rail_egr: String,
     pub dtc_summary: String,
 }
 
@@ -146,14 +153,21 @@ impl DashboardController {
         let Some(raw) = Self::read_trimmed(&self.paths.bridge.join("obd.json")) else {
             return ObdHud {
                 connected: false,
+                dpf_regen: false,
                 status: "Appairez via l'app CarFluxoid".into(),
                 rpm: "—".into(),
+                rpm_ratio: 0.0,
                 speed: "—".into(),
+                gear: "—".into(),
+                power_torque: "—".into(),
                 boost: "—".into(),
+                boost_ratio: 0.0,
                 coolant: "—".into(),
                 fuel: "—".into(),
+                fuel_ratio: 0.0,
                 battery: "—".into(),
                 consumption: "—".into(),
+                rail_egr: "—".into(),
                 dtc_summary: "Aucun défaut".into(),
             };
         };
@@ -163,20 +177,36 @@ impl DashboardController {
         let status = if dpf_regen {
             "REGEN FAP EN COURS — ne coupez pas".into()
         } else if connected {
-            let name = json_str(&raw, "adapter_name").unwrap_or("Vgate connecté");
-            if let Some(hp) = json_num(&raw, "power_hp") {
-                format!("{name} · {:.0} ch", hp)
-            } else {
-                name.to_string()
-            }
+            json_str(&raw, "adapter_name")
+                .unwrap_or("Vgate connecté")
+                .to_string()
         } else if state == "connecting" || state == "reconnecting" {
             "Connexion au boîtier…".into()
         } else {
             "Appairez via l'app CarFluxoid".into()
         };
-        let gear = json_str(&raw, "gear").unwrap_or("");
+        let rpm_val = json_num(&raw, "rpm");
+        let boost_val = json_num(&raw, "boost_bar");
+        let fuel_val = json_num(&raw, "fuel_level_pct");
+        let hp_val = json_num(&raw, "power_hp");
+        let nm_val = json_num(&raw, "torque_nm");
+        let rail_val = json_num(&raw, "rail_bar");
+        let egr_val = json_num(&raw, "egr_pct");
+        let lam_val = json_num(&raw, "lambda");
         let dpf_temp = json_num(&raw, "dpf_temp_c");
-        let egr = json_num(&raw, "egr_pct");
+        let gear_str = json_str(&raw, "gear").unwrap_or("—").to_string();
+
+        let power_torque = match (hp_val, nm_val) {
+            (Some(hp), Some(nm)) => format!("{:.0} ch · {:.0} Nm", hp, nm),
+            (Some(hp), None) => format!("{:.0} ch", hp),
+            _ => "—".into(),
+        };
+        let rail_egr = match (rail_val, egr_val) {
+            (Some(r), Some(e)) => format!("Rail {:.0} bar · EGR {:.0}%", r, e),
+            (Some(r), None) => format!("Rail {:.0} bar", r),
+            (None, Some(e)) => format!("EGR {:.0} %", e),
+            (None, None) => "MultiJet OBD-II".into(),
+        };
         let dtc_count = raw
             .find("\"dtcs\":[")
             .map(|i| {
@@ -187,28 +217,34 @@ impl DashboardController {
             .unwrap_or(0);
         ObdHud {
             connected,
+            dpf_regen,
             status,
-            rpm: json_num(&raw, "rpm")
+            rpm: rpm_val
                 .map(|v| format!("{:.0} tr/min", v))
                 .unwrap_or_else(|| "—".into()),
+            rpm_ratio: rpm_val
+                .map(|v| (v as f32 / 5000.0).clamp(0.0, 1.0))
+                .unwrap_or(0.0),
             speed: json_num(&raw, "speed_kmh")
-                .map(|v| {
-                    if !gear.is_empty() && gear != "N" {
-                        format!("{:.0} km/h · V{gear}", v)
-                    } else {
-                        format!("{:.0} km/h", v)
-                    }
-                })
+                .map(|v| format!("{:.0} km/h", v))
                 .unwrap_or_else(|| "—".into()),
-            boost: json_num(&raw, "boost_bar")
+            gear: gear_str,
+            power_torque,
+            boost: boost_val
                 .map(|v| format!("{:+.2} bar", v))
                 .unwrap_or_else(|| "—".into()),
+            boost_ratio: boost_val
+                .map(|v| ((v as f32 + 0.2) / 1.8).clamp(0.0, 1.0))
+                .unwrap_or(0.0),
             coolant: json_num(&raw, "coolant_c")
                 .map(|v| format!("{:.0} °C", v))
                 .unwrap_or_else(|| "—".into()),
-            fuel: json_num(&raw, "fuel_level_pct")
+            fuel: fuel_val
                 .map(|v| format!("{:.0} %", v))
                 .unwrap_or_else(|| "—".into()),
+            fuel_ratio: fuel_val
+                .map(|v| (v as f32 / 100.0).clamp(0.0, 1.0))
+                .unwrap_or(0.0),
             battery: json_num(&raw, "battery_v")
                 .map(|v| format!("{:.1} V", v))
                 .unwrap_or_else(|| "—".into()),
@@ -216,11 +252,12 @@ impl DashboardController {
                 .map(|v| format!("{:.1} L/100", v))
                 .or_else(|| json_num(&raw, "fuel_rate_lph").map(|v| format!("{:.1} L/h", v)))
                 .unwrap_or_else(|| "—".into()),
+            rail_egr,
             dtc_summary: if dtc_count == 0 {
-                match (dpf_temp, egr) {
-                    (Some(t), Some(e)) => format!("FAP {:.0}°C · EGR {:.0}%", t, e),
+                match (dpf_temp, lam_val) {
+                    (Some(t), Some(l)) => format!("FAP {:.0}°C · λ {:.2}", t, l),
                     (Some(t), None) => format!("FAP {:.0}°C · 0 défaut", t),
-                    (None, Some(e)) => format!("EGR {:.0}% · 0 défaut", e),
+                    (None, Some(l)) => format!("λ {:.2} · 0 défaut", l),
                     (None, None) => "Aucun défaut".into(),
                 }
             } else {

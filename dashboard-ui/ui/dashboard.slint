@@ -384,16 +384,23 @@ export component DashboardWindow inherits Window {
     in property <string> draft: "";
     in property <bool> shift: false;
 
-    // Live OBD-II telemetry (populated from /run/carfluxoid/obd.json)
+    // Live OBD-II telemetry (populated dynamically from /run/carfluxoid/obd.json)
     in property <bool> obd-connected: false;
+    in property <bool> obd-dpf-regen: false;
     in property <string> obd-status: "Non connecté";
     in property <string> obd-rpm: "—";
+    in property <float> obd-rpm-ratio: 0.0;
     in property <string> obd-speed: "—";
+    in property <string> obd-gear: "—";
+    in property <string> obd-power-torque: "—";
     in property <string> obd-boost: "—";
+    in property <float> obd-boost-ratio: 0.0;
     in property <string> obd-coolant: "—";
     in property <string> obd-fuel: "—";
+    in property <float> obd-fuel-ratio: 0.0;
     in property <string> obd-battery: "—";
     in property <string> obd-consumption: "—";
+    in property <string> obd-rail-egr: "—";
     in property <string> obd-dtc-summary: "Aucun défaut";
 
     // Callbacks handled in Rust
@@ -1182,64 +1189,272 @@ export component DashboardWindow inherits Window {
             }
 
             // =================================================================
-            // PAGE 1B: OBD-II LIVE TELEMETRY
+            // PAGE 1B: OBD-II SPORT LIVE COCKPIT (dynamique ~2 FPS)
             // =================================================================
             if root.active-page == "obd": VerticalLayout {
                 vertical-stretch: 1;
-                spacing: 12px;
+                spacing: 10px;
 
-                HorizontalLayout {
-                    vertical-stretch: 1;
-                    spacing: 12px;
+                if root.obd-dpf-regen: Rectangle {
+                    height: 36px;
+                    border-radius: 10px;
+                    background: Palette.amber-bg;
+                    border-width: 1.5px;
+                    border-color: Palette.amber;
 
-                    TelemetryCard {
-                        horizontal-stretch: 1;
-                        label: "RÉGIME MOTEUR";
-                        value: root.obd-rpm;
-                        hint: "Vitesse : " + root.obd-speed;
-                        accent-color: Palette.accent;
-                    }
-
-                    TelemetryCard {
-                        horizontal-stretch: 1;
-                        label: "TURBO / BOOST";
-                        value: root.obd-boost;
-                        hint: "Conso : " + root.obd-consumption;
-                        accent-color: Palette.amber;
-                    }
-
-                    TelemetryCard {
-                        horizontal-stretch: 1;
-                        label: "TEMP. EAU";
-                        value: root.obd-coolant;
-                        hint: "Batterie : " + root.obd-battery;
-                        accent-color: Palette.blue;
+                    Text {
+                        text: "RÉGÉNÉRATION FAP EN COURS — ÉVITEZ DE COUPER LE MOTEUR";
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: Palette.amber;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                 }
 
+                // TOP SPORT TACHOMETER + GEAR + SPEED + POWER
+                Rectangle {
+                    height: 118px;
+                    border-radius: 16px;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding: 14px;
+                        spacing: 16px;
+
+                        // Gear indicator badge
+                        Rectangle {
+                            width: 82px;
+                            height: 88px;
+                            border-radius: 14px;
+                            background: Palette.accent-bg;
+                            border-width: 1.5px;
+                            border-color: Palette.accent-border;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+
+                                Text {
+                                    text: "RAPPORT";
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    color: Palette.muted;
+                                    horizontal-alignment: center;
+                                }
+
+                                Text {
+                                    text: root.obd-gear;
+                                    font-size: 40px;
+                                    font-weight: 700;
+                                    color: Palette.accent;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        // RPM bar + Speed + Power
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+
+                                Text {
+                                    text: root.obd-rpm;
+                                    font-size: 24px;
+                                    font-weight: 700;
+                                    color: Palette.ink;
+                                }
+
+                                Text {
+                                    text: root.obd-speed;
+                                    font-size: 24px;
+                                    font-weight: 700;
+                                    color: Palette.blue;
+                                }
+                            }
+
+                            // Graphical live RPM bar (0..5000 rpm)
+                            Rectangle {
+                                height: 18px;
+                                border-radius: 9px;
+                                background: Palette.surface-alt;
+                                border-width: 1px;
+                                border-color: Palette.border;
+                                clip: true;
+
+                                Rectangle {
+                                    x: 0;
+                                    y: 0;
+                                    height: parent.height;
+                                    width: parent.width * root.obd-rpm-ratio;
+                                    border-radius: 9px;
+                                    background: root.obd-rpm-ratio > 0.78 ? Palette.red
+                                        : root.obd-rpm-ratio > 0.62 ? Palette.amber
+                                        : Palette.accent;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: space-between;
+
+                                Text {
+                                    text: "Puissance : " + root.obd-power-torque;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    color: Palette.muted;
+                                }
+
+                                Text {
+                                    text: "Conso : " + root.obd-consumption;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: Palette.accent;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // MIDDLE ROW: TURBO BOOST BAR + FUEL TANK BAR
                 HorizontalLayout {
                     vertical-stretch: 1;
                     spacing: 12px;
 
-                    TelemetryCard {
+                    Rectangle {
                         horizontal-stretch: 1;
-                        label: "CARBURANT";
-                        value: root.obd-fuel;
-                        hint: "MultiJet OBD-II";
-                        accent-color: Palette.accent;
+                        border-radius: 16px;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            alignment: center;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+
+                                Text {
+                                    text: "TURBO / BOOST";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: Palette.amber;
+                                }
+
+                                Text {
+                                    text: root.obd-boost;
+                                    font-size: 22px;
+                                    font-weight: 700;
+                                    color: Palette.ink;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 14px;
+                                border-radius: 7px;
+                                background: Palette.surface-alt;
+                                clip: true;
+
+                                Rectangle {
+                                    x: 0;
+                                    y: 0;
+                                    height: parent.height;
+                                    width: parent.width * root.obd-boost-ratio;
+                                    border-radius: 7px;
+                                    background: Palette.amber;
+                                }
+                            }
+
+                            Text {
+                                text: root.obd-rail-egr;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: Palette.muted;
+                                overflow: elide;
+                            }
+                        }
                     }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        border-radius: 16px;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            alignment: center;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+
+                                Text {
+                                    text: "CARBURANT";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: Palette.accent;
+                                }
+
+                                Text {
+                                    text: root.obd-fuel;
+                                    font-size: 22px;
+                                    font-weight: 700;
+                                    color: Palette.ink;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 14px;
+                                border-radius: 7px;
+                                background: Palette.surface-alt;
+                                clip: true;
+
+                                Rectangle {
+                                    x: 0;
+                                    y: 0;
+                                    height: parent.height;
+                                    width: parent.width * root.obd-fuel-ratio;
+                                    border-radius: 7px;
+                                    background: root.obd-fuel-ratio < 0.15 ? Palette.red : Palette.accent;
+                                }
+                            }
+
+                            Text {
+                                text: "Eau : " + root.obd-coolant + "  ·  Batt : " + root.obd-battery;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: Palette.muted;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                // BOTTOM COMPACT STATUS ROW
+                HorizontalLayout {
+                    height: 82px;
+                    spacing: 12px;
 
                     TelemetryCard {
                         horizontal-stretch: 1;
-                        label: "DIAGNOSTIC ECU";
+                        label: "ANTIPOLLUTION & ECU";
                         value: root.obd-dtc-summary;
-                        hint: "App CarFluxoid pour détails";
-                        accent-color: Palette.amber;
+                        hint: "MultiJet OBD-II Live";
+                        accent-color: Palette.blue;
                     }
 
                     TelemetryCard {
                         horizontal-stretch: 1;
-                        label: "BOÎTIER VGATE";
+                        label: "BOÎTIER VGATE BLE";
                         value: root.obd-connected ? "Connecté" : "En attente";
                         hint: root.obd-status;
                         accent-color: root.obd-connected ? Palette.accent : Palette.muted;

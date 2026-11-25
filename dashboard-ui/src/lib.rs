@@ -93,14 +93,21 @@ fn sync_ui(ui: &DashboardWindow, ctrl: &DashboardController, waiting: bool) {
 
     let obd = ctrl.obd_hud();
     ui.set_obd_connected(obd.connected);
+    ui.set_obd_dpf_regen(obd.dpf_regen);
     ui.set_obd_status(obd.status.into());
     ui.set_obd_rpm(obd.rpm.into());
+    ui.set_obd_rpm_ratio(obd.rpm_ratio);
     ui.set_obd_speed(obd.speed.into());
+    ui.set_obd_gear(obd.gear.into());
+    ui.set_obd_power_torque(obd.power_torque.into());
     ui.set_obd_boost(obd.boost.into());
+    ui.set_obd_boost_ratio(obd.boost_ratio);
     ui.set_obd_coolant(obd.coolant.into());
     ui.set_obd_fuel(obd.fuel.into());
+    ui.set_obd_fuel_ratio(obd.fuel_ratio);
     ui.set_obd_battery(obd.battery.into());
     ui.set_obd_consumption(obd.consumption.into());
+    ui.set_obd_rail_egr(obd.rail_egr.into());
     ui.set_obd_dtc_summary(obd.dtc_summary.into());
 }
 
@@ -482,12 +489,16 @@ pub fn run_daemon(paths: Paths) -> Result<(), String> {
     let server = UnixDatagram::bind(&endpoint)
         .map_err(|e| format!("bind {}: {e}", endpoint.display()))?;
     server
-        .set_read_timeout(Some(Duration::from_millis(500)))
+        .set_read_timeout(Some(Duration::from_millis(250)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
 
     let mut pixel_buf = Vec::new();
     let mut cfg_cache: HashMap<(u32, u32), (Vec<u8>, i32)> = HashMap::new();
     let mut last_telemetry_refresh = Instant::now();
+    let mut last_obd_publish = Instant::now();
+    let mut last_obd_mtime = fs::metadata(paths.bridge.join("obd.json"))
+        .and_then(|m| m.modified())
+        .ok();
     let mut last_logo_mtime = fs::metadata(paths.settings.join("logo.png"))
         .and_then(|m| m.modified())
         .ok();
@@ -595,6 +606,18 @@ pub fn run_daemon(paths: Paths) -> Result<(), String> {
                 need_publish = true;
             }
             if c.size != c.dimensions() {
+                need_publish = true;
+            }
+        }
+
+        // Live dynamic refresh (~2 FPS) whenever the OBD Sport tab is open and obd.json updates
+        if ctrl.borrow().active_page == "obd" && last_obd_publish.elapsed() >= Duration::from_millis(450) {
+            let cur_obd_mtime = fs::metadata(paths.bridge.join("obd.json"))
+                .and_then(|m| m.modified())
+                .ok();
+            if cur_obd_mtime != last_obd_mtime {
+                last_obd_mtime = cur_obd_mtime;
+                last_obd_publish = Instant::now();
                 need_publish = true;
             }
         }
