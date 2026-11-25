@@ -188,6 +188,29 @@ pub struct ObdLiveSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ambient_c: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub egr_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pedal_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_temp_c: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_soot_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_diff_kpa: Option<f64>,
+    pub dpf_regen_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gear: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_hp: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub torque_nm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_s: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dist_since_clear_km: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gps: Option<GpsFix>,
     pub dtcs: Vec<DtcCode>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -517,6 +540,137 @@ pub fn estimate_diesel_fuel_lph(
     let fuel_g_s = maf / afr;
     let lph = (fuel_g_s * 3.6) / DIESEL_DENSITY_KG_L;
     Some((lph.clamp(0.0, 60.0) * 100.0).round() / 100.0)
+}
+
+fn estimate_gear(speed_kmh: f64, rpm: f64) -> String {
+    if speed_kmh < 2.5 || rpm < 600.0 {
+        return "N".into();
+    }
+    let ratio = speed_kmh / (rpm / 1000.0);
+    if ratio < 11.5 {
+        "1".into()
+    } else if ratio < 19.5 {
+        "2".into()
+    } else if ratio < 28.5 {
+        "3".into()
+    } else if ratio < 38.5 {
+        "4".into()
+    } else if ratio < 49.5 {
+        "5".into()
+    } else {
+        "6".into()
+    }
+}
+
+fn estimate_diesel_power_torque(fuel_lph: Option<f64>, rpm: Option<f64>) -> (Option<f64>, Option<f64>) {
+    let Some(lph) = fuel_lph else {
+        return (None, None);
+    };
+    // Diesel LHV ~9.96 kWh/L * ~36% effective thermal efficiency -> ~3.58 kW per L/h.
+    let kw = (lph * 3.58).clamp(0.0, 125.0);
+    let hp = (kw * 1.3596).round();
+    let torque = rpm
+        .filter(|&r| r >= 700.0)
+        .map(|r| ((kw * 9549.3) / r).clamp(0.0, 420.0).round());
+    (Some(hp), torque)
+}
+
+pub fn parse_uds_22(raw: &str, hi: u8, lo: u8) -> Option<Vec<u8>> {
+    let mut hex = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.is_empty()
+            || t.starts_with("SEARCHING")
+            || t.starts_with("NO DATA")
+            || t.starts_with("STOPPED")
+            || t.starts_with("UNABLE")
+            || t.starts_with("ERROR")
+            || t.starts_with('?')
+        {
+            continue;
+        }
+        let body = match t.split_once(':') {
+            Some((prefix, rest)) if prefix.len() <= 2 && prefix.chars().all(|c| c.is_ascii_hexdigit()) => {
+                rest
+            }
+            _ => t,
+        };
+        for c in body.chars() {
+            if c.is_ascii_hexdigit() {
+                hex.push(c.to_ascii_uppercase());
+            }
+        }
+    }
+    if hex.len() < 6 || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        let s = std::str::from_utf8(pair).ok()?;
+        bytes.push(u8::from_str_radix(s, 16).ok()?);
+    }
+    for i in 0..bytes.len().saturating_sub(2) {
+        if bytes[i] == 0x62 && bytes[i + 1] == hi && bytes[i + 2] == lo {
+            return Some(bytes[i + 3..].to_vec());
+        }
+    }
+    None
+}
+
+pub fn parse_vin(raw: &str) -> Option<String> {
+    let mut hex = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.is_empty()
+            || t.starts_with("SEARCHING")
+            || t.starts_with("NO DATA")
+            || t.starts_with("ERROR")
+            || t.starts_with('?')
+        {
+            continue;
+        }
+        // Skip ISO-TP length header line like "014"
+        if t.len() <= 3 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let body = match t.split_once(':') {
+            Some((prefix, rest)) if prefix.len() <= 2 && prefix.chars().all(|c| c.is_ascii_hexdigit()) => {
+                rest
+            }
+            _ => t,
+        };
+        for c in body.chars() {
+            if c.is_ascii_hexdigit() {
+                hex.push(c.to_ascii_uppercase());
+            }
+        }
+    }
+    if hex.len() < 12 || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        let s = std::str::from_utf8(pair).ok()?;
+        bytes.push(u8::from_str_radix(s, 16).ok()?);
+    }
+    let start = (0..bytes.len().saturating_sub(2))
+        .find(|&i| bytes[i] == 0x49 && bytes[i + 1] == 0x02)?;
+    let mut payload = &bytes[start + 2..];
+    if !payload.is_empty() && payload[0] <= 5 {
+        payload = &payload[1..];
+    }
+    let vin: String = payload
+        .iter()
+        .copied()
+        .filter(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        .map(char::from)
+        .take(17)
+        .collect();
+    if vin.len() == 17 {
+        Some(vin)
+    } else {
+        None
+    }
 }
 
 fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
@@ -1263,7 +1417,18 @@ fn run_elm_session(
         ),
     );
 
-    // Initial DTC read.
+    // Initial VIN (Mode 09 PID 02) & DTC read.
+    let vin = transport
+        .send_command("0902", Duration::from_millis(2500))
+        .ok()
+        .and_then(|r| parse_vin(&r));
+    if let Some(ref v) = vin {
+        push_log(svc, format!("VIN détecté: {}***{}", &v[..4], &v[13..]));
+    }
+    let is_29bit_can = protocol
+        .as_deref()
+        .map(|p| p.contains("29"))
+        .unwrap_or(false);
     let mut dtcs = read_all_dtcs(transport);
     {
         let mut live = svc.live.lock().unwrap();
@@ -1276,12 +1441,15 @@ fn run_elm_session(
         };
         live.elm_version = elm_ver;
         live.protocol = protocol;
+        live.vin = vin;
         live.supported_pids = supported_labels;
         live.dtcs = dtcs.clone();
     }
 
     let mut probed_failures: HashMap<u8, u8> = HashMap::new();
+    let mut uds_dpf_failures: u8 = 0;
     let mut last_slow = Instant::now() - Duration::from_secs(30);
+    let mut last_uds = Instant::now() - Duration::from_secs(60);
     let mut consec_errors = 0u32;
 
     loop {
@@ -1428,7 +1596,8 @@ fn run_elm_session(
             mark_probe(0x5E, got, &mut supported, &mut probed_failures);
         }
 
-        // Slow tier every 5 seconds: Coolant, Oil, Intake, Baro, Rail, Fuel Level, Ambient, Voltage.
+        // Slow tier every 5 seconds: Coolant, Oil, Intake, Baro, Rail, Fuel Level, Ambient, Voltage,
+        // EGR, Pedal, DPF Temp/Diff, Engine Runtime, Dist since DTC clear.
         let do_slow = last_slow.elapsed() >= Duration::from_secs(5);
         let mut coolant = None;
         let mut oil = None;
@@ -1438,6 +1607,26 @@ fn run_elm_session(
         let mut fuel_lvl = None;
         let mut ambient = None;
         let mut batt_v = None;
+        let mut egr_pct = None;
+        let mut pedal_pct = None;
+        let mut dpf_temp_c = None;
+        let mut dpf_soot_pct = None;
+        let mut dpf_diff_kpa = None;
+        let mut runtime_s = None;
+        let mut dist_since_clear_km = None;
+
+        if should_poll(0x49, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("0149", Duration::from_millis(800)) {
+                if let Some(d) = parse_mode01_bytes(&r, 0x49) {
+                    if !d.is_empty() {
+                        pedal_pct = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                        got = true;
+                    }
+                }
+            }
+            mark_probe(0x49, got, &mut supported, &mut probed_failures);
+        }
 
         if do_slow {
             last_slow = Instant::now();
@@ -1548,6 +1737,128 @@ fn run_elm_session(
                     }
                 }
             }
+            if should_poll(0x2C, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("012C", Duration::from_millis(900)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x2C) {
+                        if !d.is_empty() {
+                            egr_pct = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x2C, got, &mut supported, &mut probed_failures);
+            }
+            if should_poll(0x3C, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("013C", Duration::from_millis(900)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x3C) {
+                        if d.len() >= 2 {
+                            let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
+                            let c = (f64::from(raw) / 10.0 - 40.0).round();
+                            if (-40.0..=1100.0).contains(&c) {
+                                dpf_temp_c = Some(c);
+                                got = true;
+                            }
+                        }
+                    }
+                }
+                mark_probe(0x3C, got, &mut supported, &mut probed_failures);
+            }
+            if dpf_temp_c.is_none() && should_poll(0x78, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0178", Duration::from_millis(1000)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x78) {
+                        if d.len() >= 3 {
+                            let raw = u16::from(d[1]) * 256 + u16::from(d[2]);
+                            let c = (f64::from(raw) / 10.0 - 40.0).round();
+                            if (-40.0..=1100.0).contains(&c) {
+                                dpf_temp_c = Some(c);
+                                got = true;
+                            }
+                        }
+                    }
+                }
+                mark_probe(0x78, got, &mut supported, &mut probed_failures);
+            }
+            if should_poll(0x7A, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("017A", Duration::from_millis(1000)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x7A) {
+                        if d.len() >= 3 {
+                            let raw = u16::from(d[1]) * 256 + u16::from(d[2]);
+                            dpf_diff_kpa = Some((f64::from(raw) * 0.01 * 10.0).round() / 10.0);
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x7A, got, &mut supported, &mut probed_failures);
+            }
+            if should_poll(0x1F, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("011F", Duration::from_millis(900)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x1F) {
+                        if d.len() >= 2 {
+                            runtime_s = Some(u32::from(u16::from(d[0]) * 256 + u16::from(d[1])));
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x1F, got, &mut supported, &mut probed_failures);
+            }
+            if should_poll(0x31, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0131", Duration::from_millis(900)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x31) {
+                        if d.len() >= 2 {
+                            dist_since_clear_km = Some(u32::from(u16::from(d[0]) * 256 + u16::from(d[1])));
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x31, got, &mut supported, &mut probed_failures);
+            }
+            // Safe Fiat MultiJet UDS Mode 22 DPF probe (every 25 s; stops after 2 misses).
+            if uds_dpf_failures < 2 && last_uds.elapsed() >= Duration::from_secs(25) {
+                last_uds = Instant::now();
+                let mut uds_ok = false;
+                let ecu_hdr = if is_29bit_can { "ATSHDA10F1" } else { "ATSH7E0" };
+                let def_hdr = if is_29bit_can { "ATSHDB33F1" } else { "ATSH7DF" };
+                if transport.send_command(ecu_hdr, Duration::from_millis(700)).is_ok() {
+                    if let Ok(r) = transport.send_command("2218E4", Duration::from_millis(1200)) {
+                        if let Some(d) = parse_uds_22(&r, 0x18, 0xE4) {
+                            if d.len() >= 2 {
+                                let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
+                                let pct = ((f64::from(raw) * 1000.0 / 65535.0) * 10.0).round() / 10.0;
+                                if (0.0..=150.0).contains(&pct) {
+                                    dpf_soot_pct = Some(pct);
+                                    uds_ok = true;
+                                }
+                            }
+                        }
+                    }
+                    if dpf_temp_c.is_none() {
+                        if let Ok(r) = transport.send_command("2218DE", Duration::from_millis(1200)) {
+                            if let Some(d) = parse_uds_22(&r, 0x18, 0xDE) {
+                                if d.len() >= 2 {
+                                    let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
+                                    let c = (f64::from(raw) * 0.02 - 40.0).round();
+                                    if (-40.0..=1100.0).contains(&c) {
+                                        dpf_temp_c = Some(c);
+                                        uds_ok = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = transport.send_command(def_hdr, Duration::from_millis(700));
+                }
+                if uds_ok {
+                    uds_dpf_failures = 0;
+                } else {
+                    uds_dpf_failures = uds_dpf_failures.saturating_add(1);
+                }
+            }
             svc.live.lock().unwrap().supported_pids =
                 supported.iter().map(|p| format!("01{p:02X}")).collect();
         }
@@ -1608,6 +1919,34 @@ fn run_elm_session(
             if batt_v.is_some() {
                 live.battery_v = batt_v;
             }
+            if egr_pct.is_some() {
+                live.egr_pct = egr_pct;
+            }
+            if pedal_pct.is_some() {
+                live.pedal_pct = pedal_pct;
+            }
+            if dpf_temp_c.is_some() {
+                live.dpf_temp_c = dpf_temp_c;
+            }
+            if dpf_soot_pct.is_some() {
+                live.dpf_soot_pct = dpf_soot_pct;
+            }
+            if dpf_diff_kpa.is_some() {
+                live.dpf_diff_kpa = dpf_diff_kpa;
+            }
+            if let Some(t) = live.dpf_temp_c {
+                if t >= 480.0 {
+                    live.dpf_regen_active = true;
+                } else if t < 420.0 {
+                    live.dpf_regen_active = false;
+                }
+            }
+            if runtime_s.is_some() {
+                live.runtime_s = runtime_s;
+            }
+            if dist_since_clear_km.is_some() {
+                live.dist_since_clear_km = dist_since_clear_km;
+            }
             if let Some(m) = live.map_kpa {
                 let b = live.baro_kpa.unwrap_or(101.3);
                 live.boost_bar = Some(((m - b) / 100.0 * 100.0).round() / 100.0);
@@ -1621,10 +1960,16 @@ fn run_elm_session(
                 live.intake_c,
             );
             live.fuel_rate_lph = lph;
+            let (hp, nm) = estimate_diesel_power_torque(lph, live.rpm);
+            live.power_hp = hp;
+            live.torque_nm = nm;
             let spd_for_cons = live
                 .speed_kmh
                 .or_else(|| live.gps.as_ref().and_then(|g| g.speed_kmh))
                 .unwrap_or(0.0);
+            if let Some(r) = live.rpm {
+                live.gear = Some(estimate_gear(spd_for_cons, r));
+            }
             live.fuel_l_per_100km = if spd_for_cons >= 5.0 {
                 lph.map(|r| ((r / spd_for_cons * 100.0).min(45.0) * 10.0).round() / 10.0)
             } else {
@@ -2188,5 +2533,23 @@ mod tests {
         assert!(is_likely_obd_name("Android-Vlink"));
         assert!(is_likely_obd_name("Vgate iCar Pro"));
         assert!(!is_likely_obd_name("iPhone de Aymene"));
+    }
+
+    #[test]
+    fn decodes_gear_power_vin_and_fiat_uds_dpf() {
+        assert_eq!(estimate_gear(0.0, 820.0), "N");
+        assert_eq!(estimate_gear(30.0, 2000.0), "2");
+        assert_eq!(estimate_gear(90.0, 2000.0), "5");
+        assert_eq!(estimate_gear(130.0, 2400.0), "6");
+
+        let (hp, nm) = estimate_diesel_power_torque(Some(10.0), Some(2000.0));
+        assert!(hp.unwrap() > 40.0 && hp.unwrap() < 60.0);
+        assert!(nm.unwrap() > 140.0 && nm.unwrap() < 200.0);
+
+        let uds = parse_uds_22("62 18 E4 0F A0\r\n>", 0x18, 0xE4).unwrap();
+        assert_eq!(uds, vec![0x0F, 0xA0]);
+
+        let vin = parse_vin("014\r\n0: 49 02 01 5A 46 41\r\n1: 33 35 36 30 30 30 30\r\n2: 31 32 33 34 35 36 37\r\n>").unwrap();
+        assert_eq!(vin, "ZFA35600001234567");
     }
 }

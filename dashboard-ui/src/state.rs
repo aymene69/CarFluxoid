@@ -158,16 +158,25 @@ impl DashboardController {
             };
         };
         let connected = json_bool(&raw, "connected");
+        let dpf_regen = json_bool(&raw, "dpf_regen_active");
         let state = json_str(&raw, "state").unwrap_or("disconnected");
-        let status = if connected {
-            json_str(&raw, "adapter_name")
-                .unwrap_or("Vgate connecté")
-                .to_string()
+        let status = if dpf_regen {
+            "REGEN FAP EN COURS — ne coupez pas".into()
+        } else if connected {
+            let name = json_str(&raw, "adapter_name").unwrap_or("Vgate connecté");
+            if let Some(hp) = json_num(&raw, "power_hp") {
+                format!("{name} · {:.0} ch", hp)
+            } else {
+                name.to_string()
+            }
         } else if state == "connecting" || state == "reconnecting" {
             "Connexion au boîtier…".into()
         } else {
             "Appairez via l'app CarFluxoid".into()
         };
+        let gear = json_str(&raw, "gear").unwrap_or("");
+        let dpf_temp = json_num(&raw, "dpf_temp_c");
+        let egr = json_num(&raw, "egr_pct");
         let dtc_count = raw
             .find("\"dtcs\":[")
             .map(|i| {
@@ -183,7 +192,13 @@ impl DashboardController {
                 .map(|v| format!("{:.0} tr/min", v))
                 .unwrap_or_else(|| "—".into()),
             speed: json_num(&raw, "speed_kmh")
-                .map(|v| format!("{:.0} km/h", v))
+                .map(|v| {
+                    if !gear.is_empty() && gear != "N" {
+                        format!("{:.0} km/h · V{gear}", v)
+                    } else {
+                        format!("{:.0} km/h", v)
+                    }
+                })
                 .unwrap_or_else(|| "—".into()),
             boost: json_num(&raw, "boost_bar")
                 .map(|v| format!("{:+.2} bar", v))
@@ -202,7 +217,12 @@ impl DashboardController {
                 .or_else(|| json_num(&raw, "fuel_rate_lph").map(|v| format!("{:.1} L/h", v)))
                 .unwrap_or_else(|| "—".into()),
             dtc_summary: if dtc_count == 0 {
-                "Aucun défaut".into()
+                match (dpf_temp, egr) {
+                    (Some(t), Some(e)) => format!("FAP {:.0}°C · EGR {:.0}%", t, e),
+                    (Some(t), None) => format!("FAP {:.0}°C · 0 défaut", t),
+                    (None, Some(e)) => format!("EGR {:.0}% · 0 défaut", e),
+                    (None, None) => "Aucun défaut".into(),
+                }
             } else {
                 format!("{dtc_count} défaut(s)")
             },
