@@ -190,6 +190,10 @@ pub struct ObdLiveSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub egr_pct: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub egr_error_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lambda: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pedal_pct: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpf_temp_c: Option<f64>,
@@ -208,6 +212,8 @@ pub struct ObdLiveSnapshot {
     pub runtime_s: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dist_since_clear_km: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmups_since_clear: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -506,10 +512,14 @@ pub fn describe_dtc_fr(code: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Estimate Diesel MultiJet fuel rate (L/h) from direct PID 0x5E, or MAF + Load, or MAP + RPM + IAT.
+/// Estimate Diesel MultiJet fuel rate (L/h) from:
+/// 1) Direct PID 0x5E,
+/// 2) Exact Wideband O2 Lambda (PID 0x34) + MAF (PID 0x10) — laboratory-grade accuracy on Fiat MultiJet,
+/// 3) Dynamic Load-based AFR + MAF (or MAP/RPM/IAT speed-density fallback).
 pub fn estimate_diesel_fuel_lph(
     direct_fuel_rate_lph: Option<f64>,
     maf_gps: Option<f64>,
+    lambda: Option<f64>,
     load_pct: Option<f64>,
     map_kpa: Option<f64>,
     rpm: Option<f64>,
@@ -521,9 +531,7 @@ pub fn estimate_diesel_fuel_lph(
         }
     }
     const DIESEL_DENSITY_KG_L: f64 = 0.835;
-    let load = load_pct.unwrap_or(25.0).clamp(0.0, 100.0);
-    // Diesel MultiJet runs lean at idle (~52:1) down to ~18:1 under full boost/load.
-    let afr = (52.0 - 0.34 * load).clamp(18.0, 55.0);
+    const DIESEL_STOICH_AFR: f64 = 14.5;
     let maf = maf_gps.or_else(|| {
         // Speed-density fallback for 1.6L MultiJet if MAF isn't exposed.
         let (map, r) = (map_kpa?, rpm?);
@@ -533,10 +541,20 @@ pub fn estimate_diesel_fuel_lph(
         let temp_k = (intake_c.unwrap_or(25.0) + 273.15).clamp(230.0, 380.0);
         let disp_l = 1.598;
         let ve = 0.88;
-        // Ideal gas law: air_g_s = (MAP_kPa * V_L / (R * T_K)) * (RPM / 120) * M_air * VE
         let moles_per_s = (map * disp_l / (8.3145 * temp_k)) * (r / 120.0) * ve;
         Some((moles_per_s * 28.97).max(0.0))
     })?;
+    let afr = if let Some(lam) = lambda.filter(|&l| (0.85..=12.0).contains(&l)) {
+        if lam > 7.5 {
+            // Overrun / deceleration fuel cut.
+            return Some(0.0);
+        }
+        (DIESEL_STOICH_AFR * lam).clamp(14.0, 110.0)
+    } else {
+        let load = load_pct.unwrap_or(25.0).clamp(0.0, 100.0);
+        // Diesel MultiJet runs lean at idle (~52:1) down to ~18:1 under full boost/load.
+        (52.0 - 0.34 * load).clamp(18.0, 55.0)
+    };
     let fuel_g_s = maf / afr;
     let lph = (fuel_g_s * 3.6) / DIESEL_DENSITY_KG_L;
     Some((lph.clamp(0.0, 60.0) * 100.0).round() / 100.0)
@@ -1307,7 +1325,7 @@ fn discover_supported_pids(
     first_timeout: Duration,
 ) -> bool {
     let mut any_ok = false;
-    for base in [0x00u8, 0x20, 0x40, 0x60] {
+    for base in [0x00u8, 0x20, 0x40, 0x60, 0x80] {
         let cmd = format!("01{:02X}", base);
         let tmo = if base == 0x00 {
             first_timeout
@@ -1614,13 +1632,32 @@ fn run_elm_session(
         let mut ambient = None;
         let mut batt_v = None;
         let mut egr_pct = None;
+        let mut egr_error_pct = None;
+        let mut lambda = None;
         let mut pedal_pct = None;
         let mut dpf_temp_c = None;
         let mut dpf_soot_pct = None;
         let mut dpf_diff_kpa = None;
         let mut runtime_s = None;
         let mut dist_since_clear_km = None;
+        let mut warmups_since_clear = None;
 
+        if should_poll(0x34, &supported, &probed_failures) {
+            let mut got = false;
+            if let Ok(r) = transport.send_command("0134", Duration::from_millis(800)) {
+                if let Some(d) = parse_mode01_bytes(&r, 0x34) {
+                    if d.len() >= 2 {
+                        let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
+                        let lam = (2.0 / 65536.0) * f64::from(raw);
+                        if (0.5..=16.0).contains(&lam) {
+                            lambda = Some((lam * 100.0).round() / 100.0);
+                            got = true;
+                        }
+                    }
+                }
+            }
+            mark_probe(0x34, got, &mut supported, &mut probed_failures);
+        }
         if should_poll(0x49, &supported, &probed_failures) {
             let mut got = false;
             if let Ok(r) = transport.send_command("0149", Duration::from_millis(800)) {
@@ -1754,6 +1791,31 @@ fn run_elm_session(
                     }
                 }
                 mark_probe(0x2C, got, &mut supported, &mut probed_failures);
+            }
+            if should_poll(0x2D, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("012D", Duration::from_millis(900)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x2D) {
+                        if !d.is_empty() {
+                            let err = ((f64::from(d[0]) - 128.0) * 100.0 / 128.0 * 10.0).round() / 10.0;
+                            egr_error_pct = Some(err);
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x2D, got, &mut supported, &mut probed_failures);
+            }
+            if should_poll(0x30, &supported, &probed_failures) {
+                let mut got = false;
+                if let Ok(r) = transport.send_command("0130", Duration::from_millis(900)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x30) {
+                        if !d.is_empty() {
+                            warmups_since_clear = Some(u16::from(d[0]));
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x30, got, &mut supported, &mut probed_failures);
             }
             if should_poll(0x3C, &supported, &probed_failures) {
                 let mut got = false;
@@ -1928,6 +1990,12 @@ fn run_elm_session(
             if egr_pct.is_some() {
                 live.egr_pct = egr_pct;
             }
+            if egr_error_pct.is_some() {
+                live.egr_error_pct = egr_error_pct;
+            }
+            if lambda.is_some() {
+                live.lambda = lambda;
+            }
             if pedal_pct.is_some() {
                 live.pedal_pct = pedal_pct;
             }
@@ -1953,6 +2021,9 @@ fn run_elm_session(
             if dist_since_clear_km.is_some() {
                 live.dist_since_clear_km = dist_since_clear_km;
             }
+            if warmups_since_clear.is_some() {
+                live.warmups_since_clear = warmups_since_clear;
+            }
             if let Some(m) = live.map_kpa {
                 let b = live.baro_kpa.unwrap_or(101.3);
                 live.boost_bar = Some(((m - b) / 100.0 * 100.0).round() / 100.0);
@@ -1960,6 +2031,7 @@ fn run_elm_session(
             let lph = estimate_diesel_fuel_lph(
                 direct_fuel_lph,
                 live.maf_gps,
+                live.lambda,
                 live.load_pct,
                 live.map_kpa,
                 live.rpm,
@@ -2525,11 +2597,20 @@ mod tests {
     fn estimates_diesel_fuel_rate_accurately() {
         // Direct PID 0x5E takes precedence.
         assert_eq!(
-            estimate_diesel_fuel_lph(Some(4.8), Some(15.0), Some(30.0), None, None, None),
+            estimate_diesel_fuel_lph(Some(4.8), Some(15.0), Some(2.0), Some(30.0), None, None, None),
             Some(4.8)
         );
-        // MAF + Load Diesel MultiJet fallback at ~35% load (AFR ~40.1), 20 g/s -> ~2.15 L/h.
-        let est = estimate_diesel_fuel_lph(None, Some(20.0), Some(35.0), None, None, None).unwrap();
+        // Wideband Lambda (PID 0x34) + MAF (PID 0x10) exact Fiat MultiJet calculation:
+        // MAF 25 g/s, lambda 2.5 -> AFR 36.25 -> 0.6897 g/s -> 2.97 L/h.
+        let exact = estimate_diesel_fuel_lph(None, Some(25.0), Some(2.5), Some(40.0), None, None, None).unwrap();
+        assert!(exact > 2.8 && exact < 3.2, "unexpected lambda diesel rate: {exact}");
+        // Overrun fuel cut (lambda > 7.5) -> 0.0 L/h.
+        assert_eq!(
+            estimate_diesel_fuel_lph(None, Some(15.0), Some(9.0), Some(5.0), None, None, None),
+            Some(0.0)
+        );
+        // MAF + Load fallback when Lambda is absent.
+        let est = estimate_diesel_fuel_lph(None, Some(20.0), None, Some(35.0), None, None, None).unwrap();
         assert!(est > 1.5 && est < 3.0, "unexpected diesel estimate: {est}");
     }
 
