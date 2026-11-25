@@ -2,23 +2,16 @@
 """
 CarFluxoid Interactive Virtual OBD-II Simulator (Fiat Tipo MultiJet)
 --------------------------------------------------------------------
-Drives the real 800x480 CarFluxoid Uconnect Slint preview window (`dashboard-ui --preview`)
-AND exposes a local CarFluxoid-compatible HTTP API (http://0.0.0.0:8088/api/obd/live)
-so you can test both the Uconnect OBD Sport screen and the iPhone app from your Mac!
-
-Controls (keyboard or sliders):
-  UP / Z / W   : Accelerator (hold)
-  DOWN / S     : Brake (hold)
-  E / Q / 0-6  : Shift gear up/down (switches to Manual mode)
-  A            : Toggle Auto / Manual gearbox
-  R            : Toggle FAP Regeneration alert (620°C)
-  D            : Toggle Autopilot demo cruise
+Zero external dependencies (works with any Python 3.9+ — no tkinter/pygame needed!).
+Launches:
+  1. The real native 800x480 CarFluxoid Uconnect Slint preview window (`dashboard-ui --preview`)
+  2. A sleek interactive Web Driving Console at http://127.0.0.1:8088 (opens in your browser)
+  3. A CarFluxoid-compatible HTTP API on http://0.0.0.0:8088/api/obd/live (testable from iPhone!)
 """
 
 import http.server
 import json
 import math
-import os
 import socket
 import socketserver
 import subprocess
@@ -26,7 +19,7 @@ import sys
 import tempfile
 import threading
 import time
-import tkinter as tk
+import webbrowser
 from pathlib import Path
 
 PREVIEW_DIR = Path(tempfile.gettempdir()) / "carfluxoid-preview-settings"
@@ -43,12 +36,218 @@ GEAR_RATIOS = {
     6: 54.0,
 }
 
+CONSOLE_HTML = r"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CarFluxoid — Simulateur OBD-II Fiat Tipo MultiJet</title>
+<style>
+  :root {
+    --bg: #080d16; --surface: #121c2e; --alt: #172338; --border: rgba(255,255,255,0.09);
+    --accent: #14d4b4; --blue: #38bdf8; --amber: #f59e0b; --red: #f87171; --muted: #8ea2be;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+    background: var(--bg); color: #f4f7fc; padding: 18px; max-width: 620px; margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; color: var(--accent); }
+  .sub { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 14px 16px; margin-bottom: 12px;
+  }
+  .hud { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; text-align: center; }
+  .hud .k { font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: .6px; }
+  .hud .v { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .v.accent { color: var(--accent); } .v.blue { color: var(--blue); } .v.amber { color: var(--amber); }
+  .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+  .row strong { color: #fff; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 26px; cursor: pointer; }
+  .pedals { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+  .pedal {
+    padding: 16px; border-radius: 14px; border: 1px solid var(--border); font-weight: 800; font-size: 15px;
+    cursor: pointer; user-select: none; -webkit-user-select: none; transition: transform .05s;
+  }
+  .pedal:active, .pedal.on { transform: scale(0.97); }
+  .gas { background: rgba(20,212,180,0.16); color: var(--accent); border-color: rgba(20,212,180,0.45); }
+  .gas.on { background: var(--accent); color: #041c1a; }
+  .brk { background: rgba(248,113,113,0.16); color: var(--red); border-color: rgba(248,113,113,0.45); }
+  .brk.on { background: var(--red); color: #1c0404; }
+  .gears { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .gbtn {
+    flex: 1; min-width: 38px; padding: 9px 0; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--alt); color: #fff; font-weight: 700; cursor: pointer;
+  }
+  .gbtn.active { background: var(--accent); color: #041c1a; border-color: var(--accent); }
+  .toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tbtn {
+    padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--alt); color: var(--muted); font-weight: 700; font-size: 12px; cursor: pointer;
+  }
+  .tbtn.on { background: rgba(20,212,180,0.2); color: var(--accent); border-color: var(--accent); }
+  .tbtn.warn.on { background: rgba(245,158,11,0.24); color: var(--amber); border-color: var(--amber); }
+  .hint { font-size: 11px; color: #647896; text-align: center; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>CarFluxoid · Simulateur Fiat Tipo MultiJet</h1>
+  <div class="sub">Pilote la fenêtre Uconnect 800×480 en direct · API iPhone : <code id="apiUrl"></code></div>
+
+  <div class="card">
+    <div class="hud">
+      <div><div class="k">Vitesse</div><div class="v blue" id="spd">0</div></div>
+      <div><div class="k">Régime</div><div class="v" id="rpm">820</div></div>
+      <div><div class="k">Rapport</div><div class="v accent" id="gear">N</div></div>
+      <div><div class="k">Turbo</div><div class="v amber" id="boost">+0.00</div></div>
+    </div>
+    <div class="hint" id="subHud">0 ch · 0 Nm · λ 5.00 · Conso —</div>
+  </div>
+
+  <div class="card">
+    <div class="pedals">
+      <button class="pedal gas" id="btnGas">⚡ ACCÉLÉRER (↑ / Z)</button>
+      <button class="pedal brk" id="btnBrk">🛑 FREINER (↓ / S)</button>
+    </div>
+    <div class="row"><span>Accélérateur maintenu</span><strong id="vThr">0 %</strong></div>
+    <input type="range" id="sThr" min="0" max="100" value="0">
+    <div class="row"><span>Niveau carburant PID 012F (+20% = test auto-plein)</span><strong id="vFuel">64 %</strong></div>
+    <input type="range" id="sFuel" min="0" max="100" value="64">
+    <div class="row"><span>Température eau moteur</span><strong id="vCool">88 °C</strong></div>
+    <input type="range" id="sCool" min="20" max="110" value="88">
+  </div>
+
+  <div class="card">
+    <div class="row"><span>Boîte de vitesses (clavier E / Q ou 0–6)</span><strong id="gMode">Auto</strong></div>
+    <div class="gears" id="gearRow"></div>
+  </div>
+
+  <div class="card">
+    <div class="toggles">
+      <button class="tbtn on" id="tAuto">Boîte Auto (A)</button>
+      <button class="tbtn" id="tDemo">Pilote Démo (D)</button>
+      <button class="tbtn warn" id="tFap">Régén. FAP 620°C (R)</button>
+      <button class="tbtn on" id="tMarg">Marges Uconnect 32px</button>
+    </div>
+  </div>
+
+  <div class="hint">Clavier actif sur cette page : ↑/Z Accélérer · ↓/S Freiner · E/Q Rapports · A Auto · R FAP · D Démo</div>
+
+<script>
+document.getElementById("apiUrl").textContent = location.origin;
+const ctrl = { throttle: 0, brake: 0, auto_gearbox: true, autopilot: false, dpf_regen: false, margins_32: true, gear: 0, fuel_pct: 64, coolant_c: 88 };
+const keys = new Set();
+let mouseGas = false, mouseBrk = false;
+
+const gearRow = document.getElementById("gearRow");
+for (let g = 0; g <= 6; g++) {
+  const b = document.createElement("button");
+  b.className = "gbtn"; b.textContent = g === 0 ? "N" : "V" + g; b.dataset.g = g;
+  b.onclick = () => { ctrl.auto_gearbox = false; ctrl.gear = g; pushCtrl({ auto_gearbox: false, gear: g }); };
+  gearRow.appendChild(b);
+}
+
+function pushCtrl(patch) {
+  Object.assign(ctrl, patch);
+  fetch("/sim/control", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(patch) }).catch(()=>{});
+  syncButtons();
+}
+
+function syncButtons() {
+  document.getElementById("tAuto").classList.toggle("on", ctrl.auto_gearbox);
+  document.getElementById("tDemo").classList.toggle("on", ctrl.autopilot);
+  document.getElementById("tFap").classList.toggle("on", ctrl.dpf_regen);
+  document.getElementById("tMarg").classList.toggle("on", ctrl.margins_32);
+  document.getElementById("gMode").textContent = ctrl.auto_gearbox ? "Automatique" : "Manuelle";
+}
+
+document.getElementById("sThr").oninput = e => { ctrl.autopilot = false; document.getElementById("vThr").textContent = e.target.value + " %"; pushCtrl({ throttle: +e.target.value, autopilot: false }); };
+document.getElementById("sFuel").oninput = e => { document.getElementById("vFuel").textContent = e.target.value + " %"; pushCtrl({ fuel_pct: +e.target.value }); };
+document.getElementById("sCool").oninput = e => { document.getElementById("vCool").textContent = e.target.value + " °C"; pushCtrl({ coolant_c: +e.target.value }); };
+
+document.getElementById("tAuto").onclick = () => pushCtrl({ auto_gearbox: !ctrl.auto_gearbox });
+document.getElementById("tDemo").onclick = () => pushCtrl({ autopilot: !ctrl.autopilot });
+document.getElementById("tFap").onclick = () => pushCtrl({ dpf_regen: !ctrl.dpf_regen });
+document.getElementById("tMarg").onclick = () => pushCtrl({ margins_32: !ctrl.margins_32 });
+
+const btnGas = document.getElementById("btnGas"), btnBrk = document.getElementById("btnBrk");
+btnGas.onpointerdown = () => { mouseGas = true; btnGas.classList.add("on"); };
+btnGas.onpointerup = btnGas.onpointerleave = () => { mouseGas = false; btnGas.classList.remove("on"); };
+btnBrk.onpointerdown = () => { mouseBrk = true; btnBrk.classList.add("on"); };
+btnBrk.onpointerup = btnBrk.onpointerleave = () => { mouseBrk = false; btnBrk.classList.remove("on"); };
+
+window.addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (["arrowup","arrowdown"," "].includes(k)) e.preventDefault();
+  if (!keys.has(k)) {
+    keys.add(k);
+    if (k === "e") pushCtrl({ auto_gearbox: false, gear: Math.min(6, ctrl.gear + 1) });
+    else if (k === "q") pushCtrl({ auto_gearbox: false, gear: Math.max(0, ctrl.gear - 1) });
+    else if ("0123456".includes(k)) pushCtrl({ auto_gearbox: false, gear: +k });
+    else if (k === "a") pushCtrl({ auto_gearbox: !ctrl.auto_gearbox });
+    else if (k === "r") pushCtrl({ dpf_regen: !ctrl.dpf_regen });
+    else if (k === "d") pushCtrl({ autopilot: !ctrl.autopilot });
+  }
+});
+window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+
+// Smooth keyboard/mouse pedal loop (20 Hz)
+setInterval(() => {
+  const gasOn = mouseGas || keys.has("arrowup") || keys.has("z") || keys.has("w");
+  const brkOn = mouseBrk || keys.has("arrowdown") || keys.has("s");
+  btnGas.classList.toggle("on", gasOn);
+  btnBrk.classList.toggle("on", brkOn);
+  let patch = {};
+  if (gasOn) {
+    ctrl.autopilot = false;
+    ctrl.throttle = Math.min(100, ctrl.throttle + 8);
+    document.getElementById("sThr").value = Math.round(ctrl.throttle);
+    document.getElementById("vThr").textContent = Math.round(ctrl.throttle) + " %";
+    patch.throttle = ctrl.throttle; patch.autopilot = false;
+  } else if (keys.size === 0 && !mouseGas && !ctrl.autopilot && ctrl.throttle > 0 && document.activeElement !== document.getElementById("sThr")) {
+    ctrl.throttle = Math.max(0, ctrl.throttle - 10);
+    document.getElementById("sThr").value = Math.round(ctrl.throttle);
+    document.getElementById("vThr").textContent = Math.round(ctrl.throttle) + " %";
+    patch.throttle = ctrl.throttle;
+  }
+  if (brkOn) {
+    ctrl.brake = Math.min(100, ctrl.brake + 18);
+    patch.brake = ctrl.brake;
+  } else if (ctrl.brake > 0) {
+    ctrl.brake = Math.max(0, ctrl.brake - 24);
+    patch.brake = ctrl.brake;
+  }
+  if (Object.keys(patch).length) pushCtrl(patch);
+}, 50);
+
+// Live HUD refresh from simulator (8 Hz)
+setInterval(async () => {
+  try {
+    const r = await fetch("/api/obd/live");
+    const d = await r.json();
+    document.getElementById("spd").textContent = Math.round(d.speed_kmh || 0) + " km/h";
+    document.getElementById("rpm").textContent = Math.round(d.rpm || 0);
+    document.getElementById("gear").textContent = d.gear || "N";
+    document.getElementById("boost").textContent = (d.boost_bar >= 0 ? "+" : "") + (d.boost_bar || 0).toFixed(2);
+    const cons = d.fuel_l_per_100km != null ? d.fuel_l_per_100km.toFixed(1) + " L/100" : (d.fuel_rate_lph || 0).toFixed(1) + " L/h";
+    document.getElementById("subHud").textContent = `${d.power_hp || 0} ch · ${d.torque_nm || 0} Nm · λ ${(d.lambda || 0).toFixed(2)} · Conso ${cons} · FAP ${d.dpf_temp_c || 0}°C`;
+    ctrl.gear = d.gear === "N" ? 0 : parseInt(d.gear || "0", 10);
+    for (const b of gearRow.children) b.classList.toggle("active", +b.dataset.g === ctrl.gear);
+  } catch (_) {}
+}, 125);
+syncButtons();
+</script>
+</body>
+</html>
+"""
+
 
 class MultiJetSim:
     def __init__(self):
         self.lock = threading.Lock()
-        self.throttle_cmd = 0.0    # 0..100
-        self.brake_cmd = 0.0       # 0..100
+        self.throttle_cmd = 0.0
+        self.brake_cmd = 0.0
         self.auto_gearbox = True
         self.autopilot = False
         self.dpf_regen = False
@@ -56,7 +255,7 @@ class MultiJetSim:
 
         self.speed_kmh = 0.0
         self.rpm = 820.0
-        self.gear = 0              # 0=N, 1..6
+        self.gear = 0
         self.boost_bar = -0.04
         self.coolant_c = 88.0
         self.fuel_pct = 64.0
@@ -66,10 +265,31 @@ class MultiJetSim:
         self.dist_since_clear = 14820
         self.start_time = time.time()
         self.trip_dist_km = 0.0
-        self.trip_fuel_l = 0.0
         self.lat = 45.7640
         self.lon = 4.8357
         self.heading = 0.6
+
+    def apply_control(self, data: dict):
+        with self.lock:
+            if "throttle" in data:
+                self.throttle_cmd = max(0.0, min(100.0, float(data["throttle"])))
+            if "brake" in data:
+                self.brake_cmd = max(0.0, min(100.0, float(data["brake"])))
+            if "auto_gearbox" in data:
+                self.auto_gearbox = bool(data["auto_gearbox"])
+            if "autopilot" in data:
+                self.autopilot = bool(data["autopilot"])
+            if "dpf_regen" in data:
+                self.dpf_regen = bool(data["dpf_regen"])
+            if "gear" in data:
+                self.gear = max(0, min(6, int(data["gear"])))
+            if "fuel_pct" in data:
+                self.fuel_pct = max(0.0, min(100.0, float(data["fuel_pct"])))
+            if "coolant_c" in data:
+                self.coolant_c = max(20.0, min(120.0, float(data["coolant_c"])))
+            if "margins_32" in data:
+                self.margins_32 = bool(data["margins_32"])
+                write_atomic(DISPLAY_FILE, "800 480 0 32\n" if self.margins_32 else "800 480 0 0\n")
 
     def step(self, dt: float):
         with self.lock:
@@ -82,7 +302,6 @@ class MultiJetSim:
             thr = self.throttle_cmd / 100.0
             brk = self.brake_cmd / 100.0
 
-            # Auto gearbox logic
             if self.auto_gearbox:
                 if self.speed_kmh < 1.5 and thr < 0.05:
                     self.gear = 0
@@ -98,14 +317,12 @@ class MultiJetSim:
                     elif est_rpm < down_rpm and self.gear > 1:
                         self.gear -= 1
 
-            # Longitudinal acceleration (1.6 MultiJet ~120ch / 320 Nm)
             gear_mult = {0: 0.0, 1: 3.1, 2: 2.0, 3: 1.35, 4: 0.95, 5: 0.72, 6: 0.55}[self.gear]
             accel = thr * 5.8 * gear_mult - brk * 24.0 - 0.12 - (self.speed_kmh ** 2) * 0.00018
             if self.gear == 0:
                 accel = -brk * 24.0 - 0.25
             self.speed_kmh = max(0.0, min(205.0, self.speed_kmh + accel * dt * 3.6))
 
-            # RPM dynamics
             if self.gear == 0:
                 target_rpm = 820.0 + thr * 3400.0
             else:
@@ -113,16 +330,14 @@ class MultiJetSim:
                 target_rpm = max(820.0, min(4850.0, wheel_rpm))
             self.rpm += (target_rpm - self.rpm) * min(1.0, dt * 8.0)
 
-            # Turbo boost spool lag
             load = max(8.0, min(100.0, 12.0 + thr * 88.0 * (min(self.rpm, 2600.0) / 2200.0)))
             target_boost = -0.05 + (load / 100.0) * 1.55 * min(1.0, max(0.15, (self.rpm - 900.0) / 1400.0))
             self.boost_bar += (target_boost - self.boost_bar) * min(1.0, dt * 3.8)
 
-            # Wideband Lambda (0134) + MAF (0110) + exact Diesel consumption
             map_kpa = 101.3 + self.boost_bar * 100.0
             maf_gps = max(6.5, (map_kpa * 1.598 / (8.3145 * 300.0)) * (self.rpm / 120.0) * 0.88 * 28.97)
             if thr < 0.02 and self.speed_kmh > 18.0 and self.gear > 0:
-                lam = 8.80  # overrun fuel cut -> 0.0 L/100!
+                lam = 8.80
                 lph = 0.0
             else:
                 lam = max(1.18, min(5.8, 5.2 - (load / 100.0) * 3.9))
@@ -134,30 +349,23 @@ class MultiJetSim:
             power_hp = round(kw * 1.3596)
             torque_nm = round(min(360.0, (kw * 9549.3) / max(self.rpm, 800.0)))
 
-            # EGR closes under high load
             egr_pct = round(max(0.0, min(85.0, 58.0 - load * 0.62)), 1)
             egr_err = round(math.sin(now * 1.3) * 1.8, 1)
             rail_bar = round(310.0 + (load / 100.0) * 1280.0)
 
-            # DPF temperature
             target_dpf = 625.0 if self.dpf_regen else (210.0 + load * 2.1)
             self.dpf_temp_c += (target_dpf - self.dpf_temp_c) * min(1.0, dt * 1.6)
             if self.dpf_regen and self.dpf_soot_pct > 6.0:
                 self.dpf_soot_pct = max(6.0, self.dpf_soot_pct - dt * 0.4)
 
-            # Trip integration + simulated GPS movement
             step_km = self.speed_kmh * (dt / 3600.0)
             self.trip_dist_km += step_km
-            self.trip_fuel_l += lph * (dt / 3600.0)
             self.fuel_pct = max(0.0, self.fuel_pct - (lph * (dt / 3600.0) / 50.0) * 100.0)
             if self.speed_kmh > 1.0:
                 self.heading += 0.03 * math.sin(now * 0.25) * dt
-                dlat = (step_km / 111.0) * math.cos(self.heading)
-                dlon = (step_km / (111.0 * math.cos(math.radians(self.lat)))) * math.sin(self.heading)
-                self.lat += dlat
-                self.lon += dlon
+                self.lat += (step_km / 111.0) * math.cos(self.heading)
+                self.lon += (step_km / (111.0 * math.cos(math.radians(self.lat)))) * math.sin(self.heading)
 
-            runtime_s = int(now - self.start_time)
             return {
                 "connected": True,
                 "state": "connected",
@@ -196,7 +404,7 @@ class MultiJetSim:
                 "gear": "N" if self.gear == 0 else str(self.gear),
                 "power_hp": power_hp,
                 "torque_nm": torque_nm,
-                "runtime_s": runtime_s,
+                "runtime_s": int(now - self.start_time),
                 "dist_since_clear_km": self.dist_since_clear + int(self.trip_dist_km),
                 "warmups_since_clear": 255,
                 "vin": "ZFA3560000SIM1234",
@@ -234,63 +442,6 @@ def local_ip() -> str:
         return "127.0.0.1"
 
 
-def start_http_server(get_snapshot):
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, format, *args):
-            pass
-
-        def _send_json(self, obj, code=200):
-            data = json.dumps(obj).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(data)
-
-        def do_GET(self):
-            if self.path == "/api/obd/live":
-                self._send_json(get_snapshot())
-            elif self.path == "/diag":
-                self._send_json({
-                    "version": "1.3.1-sim",
-                    "build": "mac-sim",
-                    "slot": "A",
-                    "temp_c": "38.2 °C",
-                    "uptime_s": 120,
-                    "display": "800x480 (marges 0x32)",
-                    "night_mode": "nuit",
-                    "gps": "Simulateur actif",
-                    "gps_carplay": "actif",
-                    "guidance": "inactif",
-                    "carplay_active": False,
-                    "airplay_active": False,
-                })
-            elif self.path == "/api/trips":
-                self._send_json([])
-            elif self.path == "/api/obd/devices":
-                self._send_json([])
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", "0"))
-            if length > 0:
-                self.rfile.read(length)
-            if self.path == "/api/time":
-                self._send_json({"unix": int(time.time())})
-            else:
-                self._send_json(get_snapshot())
-
-    class ReuseServer(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True
-
-    srv = ReuseServer(("0.0.0.0", HTTP_PORT), Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
-
-
 def main():
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     write_atomic(DISPLAY_FILE, "800 480 0 32\n")
@@ -298,187 +449,99 @@ def main():
     sim = MultiJetSim()
     latest = [sim.step(0.05)]
     write_atomic(OBD_JSON, json.dumps(latest[0]))
+    stop_event = threading.Event()
 
-    # Launch the real native 800x480 CarFluxoid Slint Uconnect window if --no-ui isn't passed.
+    def physics_loop():
+        while not stop_event.is_set():
+            snap = sim.step(0.08)
+            latest[0] = snap
+            write_atomic(OBD_JSON, json.dumps(snap))
+            time.sleep(0.08)
+
+    threading.Thread(target=physics_loop, daemon=True).start()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def _send(self, code, ctype, data: bytes):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                self._send(200, "text/html; charset=utf-8", CONSOLE_HTML.encode("utf-8"))
+            elif self.path == "/api/obd/live":
+                self._send(200, "application/json; charset=utf-8", json.dumps(latest[0]).encode("utf-8"))
+            elif self.path == "/diag":
+                diag = {
+                    "version": "1.3.1-sim", "build": "mac-sim", "slot": "A",
+                    "temp_c": "38.2 °C", "uptime_s": 120,
+                    "display": "800x480 (marges 0x32)" if sim.margins_32 else "800x480",
+                    "night_mode": "nuit", "gps": "Simulateur actif",
+                    "gps_carplay": "actif", "guidance": "inactif",
+                    "carplay_active": False, "airplay_active": False,
+                }
+                self._send(200, "application/json; charset=utf-8", json.dumps(diag).encode("utf-8"))
+            elif self.path in ("/api/trips", "/api/obd/devices"):
+                self._send(200, "application/json; charset=utf-8", b"[]")
+            else:
+                self._send(404, "text/plain", b"Not found")
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            if self.path == "/sim/control":
+                try:
+                    sim.apply_control(json.loads(body.decode("utf-8")))
+                except Exception:
+                    pass
+                self._send(200, "application/json", b'{"ok":true}')
+            elif self.path == "/api/time":
+                self._send(200, "application/json", json.dumps({"unix": int(time.time())}).encode("utf-8"))
+            else:
+                self._send(200, "application/json", json.dumps(latest[0]).encode("utf-8"))
+
+    class ReuseServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+
+    srv = ReuseServer(("0.0.0.0", HTTP_PORT), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    ip = local_ip()
+    print(f"Console de pilotage OBD : http://127.0.0.1:{HTTP_PORT}")
+    print(f"API iPhone (optionnel)  : http://{ip}:{HTTP_PORT}")
+    if "--no-browser" not in sys.argv:
+        webbrowser.open(f"http://127.0.0.1:{HTTP_PORT}")
+
     repo_root = Path(__file__).resolve().parent.parent
     ui_proc = None
-    if "--no-ui" not in sys.argv:
-        cmd = [
-            "cargo", "run",
-            "--manifest-path", str(repo_root / "dashboard-ui" / "Cargo.toml"),
-            "--features", "preview",
-            "--", "--preview",
-        ]
-        print("Lancement de la fenêtre CarFluxoid Uconnect 800x480 (Slint)…")
-        ui_proc = subprocess.Popen(cmd, cwd=str(repo_root))
-
-    start_http_server(lambda: latest[0])
-    ip = local_ip()
-
-    # Build interactive Tkinter driving console
-    root = tk.Tk()
-    root.title("CarFluxoid — Simulateur OBD-II Fiat Tipo MultiJet")
-    root.configure(bg="#090e18")
-    root.geometry("460x590")
-
-    def lbl(parent, text, size=11, bold=False, fg="#f4f7fc"):
-        weight = "bold" if bold else "normal"
-        return tk.Label(parent, text=text, bg="#090e18", fg=fg, font=("SF Pro Display", size, weight))
-
-    lbl(root, "Simulateur OBD-II · Fiat Tipo MultiJet", 16, True, "#14d4b4").pack(pady=(12, 2))
-    lbl(root, f"API iPhone optionnelle : http://{ip}:{HTTP_PORT}", 10, False, "#8ea2be").pack(pady=(0, 8))
-
-    readout_var = tk.StringVar(value="0 km/h · 820 tr/min · Rapport N")
-    tk.Label(
-        root, textvariable=readout_var, bg="#121c2e", fg="#f4f7fc",
-        font=("Menlo", 13, "bold"), padx=12, pady=10, relief="flat"
-    ).pack(fill="x", padx=16, pady=6)
-
-    sub_var = tk.StringVar(value="Boost +0.00 bar · 0 ch · λ 5.0 · 0.0 L/100")
-    lbl(root, "", 10, False, "#38bdf8").pack_forget()
-    tk.Label(
-        root, textvariable=sub_var, bg="#090e18", fg="#38bdf8",
-        font=("Menlo", 11, "bold")
-    ).pack(pady=(0, 8))
-
-    # Sliders
-    def make_slider(title, from_, to_, init, cmd):
-        frame = tk.Frame(root, bg="#090e18")
-        frame.pack(fill="x", padx=18, pady=4)
-        lbl(frame, title, 10, True, "#8ea2be").pack(anchor="w")
-        s = tk.Scale(
-            frame, from_=from_, to=to_, orient="horizontal",
-            bg="#121c2e", fg="#f4f7fc", troughcolor="#1d2c46",
-            activebackground="#14d4b4", highlightthickness=0, command=cmd
-        )
-        s.set(init)
-        s.pack(fill="x")
-        return s
-
-    thr_slider = make_slider("Accélérateur (%) — Maintiens ↑ ou Z", 0, 100, 0,
-                             lambda v: setattr(sim, "throttle_cmd", float(v)))
-    brk_slider = make_slider("Frein (%) — Maintiens ↓ ou S", 0, 100, 0,
-                             lambda v: setattr(sim, "brake_cmd", float(v)))
-    fuel_slider = make_slider("Niveau carburant PID 012F (%) — Monte de +20% pour tester auto-plein", 0, 100, 64,
-                              lambda v: setattr(sim, "fuel_pct", float(v)))
-    cool_slider = make_slider("Température eau (°C)", 20, 110, 88,
-                              lambda v: setattr(sim, "coolant_c", float(v)))
-
-    # Buttons row
-    btns = tk.Frame(root, bg="#090e18")
-    btns.pack(fill="x", padx=18, pady=10)
-
-    auto_var = tk.BooleanVar(value=True)
-    demo_var = tk.BooleanVar(value=False)
-    fap_var = tk.BooleanVar(value=False)
-    margin_var = tk.BooleanVar(value=True)
-
-    def toggle_margins():
-        sim.margins_32 = margin_var.get()
-        write_atomic(DISPLAY_FILE, "800 480 0 32\n" if sim.margins_32 else "800 480 0 0\n")
-
-    tk.Checkbutton(
-        btns, text="Boîte Auto", variable=auto_var,
-        command=lambda: setattr(sim, "auto_gearbox", auto_var.get()),
-        bg="#090e18", fg="#f4f7fc", selectcolor="#121c2e"
-    ).grid(row=0, column=0, sticky="w", padx=4)
-    tk.Checkbutton(
-        btns, text="Pilote Démo (D)", variable=demo_var,
-        command=lambda: setattr(sim, "autopilot", demo_var.get()),
-        bg="#090e18", fg="#14d4b4", selectcolor="#121c2e"
-    ).grid(row=0, column=1, sticky="w", padx=4)
-    tk.Checkbutton(
-        btns, text="Régén. FAP 620°C (R)", variable=fap_var,
-        command=lambda: setattr(sim, "dpf_regen", fap_var.get()),
-        bg="#090e18", fg="#f59e0b", selectcolor="#121c2e"
-    ).grid(row=1, column=0, sticky="w", padx=4, pady=4)
-    tk.Checkbutton(
-        btns, text="Marges Uconnect 32px", variable=margin_var,
-        command=toggle_margins,
-        bg="#090e18", fg="#38bdf8", selectcolor="#121c2e"
-    ).grid(row=1, column=1, sticky="w", padx=4, pady=4)
-
-    # Gear buttons
-    gframe = tk.Frame(root, bg="#090e18")
-    gframe.pack(pady=6)
-    lbl(gframe, "Boîte manuelle :", 10, True, "#8ea2be").pack(side="left", padx=(0, 6))
-    for g in range(7):
-        def set_g(val=g):
-            sim.auto_gearbox = False
-            auto_var.set(False)
-            sim.gear = val
-        tk.Button(
-            gframe, text="N" if g == 0 else str(g), width=3,
-            command=set_g, bg="#172338", fg="#f4f7fc", relief="flat"
-        ).pack(side="left", padx=2)
-
-    lbl(root, "Clavier : ↑/Z Accélérer · ↓/S Freiner · E/Q Rapports · R FAP · D Démo", 9, False, "#647896").pack(pady=(10, 6))
-
-    keys_held = set()
-
-    def on_key_down(ev):
-        k = ev.keysym.lower()
-        keys_held.add(k)
-        if k == "e":
-            sim.auto_gearbox = False
-            auto_var.set(False)
-            sim.gear = min(6, sim.gear + 1)
-        elif k == "q":
-            sim.auto_gearbox = False
-            auto_var.set(False)
-            sim.gear = max(0, sim.gear - 1)
-        elif k in ("0", "1", "2", "3", "4", "5", "6"):
-            sim.auto_gearbox = False
-            auto_var.set(False)
-            sim.gear = int(k)
-        elif k == "a":
-            auto_var.set(not auto_var.get())
-            sim.auto_gearbox = auto_var.get()
-        elif k == "r":
-            fap_var.set(not fap_var.get())
-            sim.dpf_regen = fap_var.get()
-        elif k == "d":
-            demo_var.set(not demo_var.get())
-            sim.autopilot = demo_var.get()
-
-    def on_key_up(ev):
-        keys_held.discard(ev.keysym.lower())
-
-    root.bind("<KeyPress>", on_key_down)
-    root.bind("<KeyRelease>", on_key_up)
-
-    def tick():
-        if not sim.autopilot:
-            if any(k in keys_held for k in ("up", "z", "w")):
-                sim.throttle_cmd = min(100.0, sim.throttle_cmd + 9.0)
-                thr_slider.set(int(sim.throttle_cmd))
-            elif thr_slider.get() > 0 and "button1" not in keys_held:
-                # Gently release accelerator when keyboard isn't held and slider was driven by keys
-                pass
-            if any(k in keys_held for k in ("down", "s")):
-                sim.brake_cmd = min(100.0, sim.brake_cmd + 15.0)
-                brk_slider.set(int(sim.brake_cmd))
-            elif sim.brake_cmd > 0 and not any(k in keys_held for k in ("down", "s")):
-                sim.brake_cmd = max(0.0, sim.brake_cmd - 18.0)
-                brk_slider.set(int(sim.brake_cmd))
-
-        snap = sim.step(0.08)
-        latest[0] = snap
-        write_atomic(OBD_JSON, json.dumps(snap))
-
-        readout_var.set(f"{snap['speed_kmh']:5.1f} km/h · {snap['rpm']:4d} tr/min · V{snap['gear']}")
-        cons = f"{snap['fuel_l_per_100km']:.1f} L/100" if snap["fuel_l_per_100km"] is not None else f"{snap['fuel_rate_lph']:.1f} L/h"
-        sub_var.set(f"Boost {snap['boost_bar']:+.2f} bar · {snap['power_hp']} ch · λ {snap['lambda']:.2f} · {cons}")
-        root.after(80, tick)
-
-    def on_close():
+    try:
+        if "--no-ui" not in sys.argv:
+            cmd = [
+                "cargo", "run",
+                "--manifest-path", str(repo_root / "dashboard-ui" / "Cargo.toml"),
+                "--features", "preview",
+                "--", "--preview",
+            ]
+            print("Lancement de la fenêtre CarFluxoid Uconnect 800x480 (Slint)… (Ctrl+C pour quitter)")
+            ui_proc = subprocess.Popen(cmd, cwd=str(repo_root))
+            ui_proc.wait()
+        else:
+            print("Mode sans fenêtre UI (--no-ui). Ctrl+C pour quitter.")
+            while True:
+                time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        srv.shutdown()
         if ui_proc and ui_proc.poll() is None:
             ui_proc.terminate()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    root.after(80, tick)
-    root.mainloop()
 
 
 if __name__ == "__main__":
