@@ -956,8 +956,14 @@ impl ActiveTrip {
         let tmp = dir.join(format!("{}.json.tmp", self.id));
         let dst = dir.join(format!("{}.json", self.id));
         if let Ok(json) = serde_json::to_string(&record) {
-            if fs::write(&tmp, json).is_ok() {
-                let _ = fs::rename(&tmp, &dst);
+            if let Ok(mut f) = fs::File::create(&tmp) {
+                if f.write_all(json.as_bytes()).is_ok() && f.sync_all().is_ok() {
+                    if fs::rename(&tmp, &dst).is_ok() {
+                        if let Ok(d) = fs::File::open(&dir) {
+                            let _ = d.sync_all();
+                        }
+                    }
+                }
             }
         }
         prune_old_trips(&dir, 200);
