@@ -317,6 +317,7 @@ fn handle(mut s:TcpStream)->std::io::Result<()>{
   ("POST","/api/obd/disconnect")=>{crate::obd::request_disconnect();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
   ("POST","/api/obd/dtc/read")=>{crate::obd::request_read_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
   ("POST","/api/obd/dtc/clear")=>{crate::obd::request_clear_dtcs();reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::live_json().as_bytes());},
+  ("POST","/api/obd/uds/scan")=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::request_uds_scan().as_bytes()),
   ("POST","/api/obd/sim")=>{
    match crate::obd::apply_simulated_json(body){
     Ok(json)=>reply(&mut s,"200 OK","application/json; charset=utf-8",json.as_bytes()),

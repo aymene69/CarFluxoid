@@ -138,6 +138,50 @@ pub struct TripRecord {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UdsRawEntry {
+    pub did: String,
+    pub label: String,
+    pub hex: String,
+    pub decoded: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UdsScanResult {
+    pub scanned_at: u64,
+    pub can_addressing: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecu_part_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecu_hw_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecu_sw_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecu_odometer_km: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oil_degradation_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oil_service_km_remaining: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oil_temp_c: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_soot_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_temp_c: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_diff_mbar: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_last_regen_km: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_avg_regen_km: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_regen_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpf_regen_progress_pct: Option<f64>,
+    pub injectors_mm3: Vec<Option<f64>>,
+    pub raw_dids: Vec<UdsRawEntry>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ObdLiveSnapshot {
     pub connected: bool,
     pub state: String,
@@ -220,6 +264,8 @@ pub struct ObdLiveSnapshot {
     pub gps: Option<GpsFix>,
     pub dtcs: Vec<DtcCode>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub uds: Option<UdsScanResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_trip: Option<TripSummary>,
     pub debug_log: Vec<String>,
     pub updated_at: u64,
@@ -232,6 +278,7 @@ enum ObdCommand {
     ReadDtcs,
     ClearDtcs,
     FinishTrip,
+    RunUdsScan,
 }
 
 struct ObdService {
@@ -413,6 +460,10 @@ pub fn parse_dtcs(raw: &str, mode_reply: u8, pending: bool) -> Vec<DtcCode> {
     for line in raw.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with("NO DATA") || t.starts_with("SEARCHING") {
+            continue;
+        }
+        // Skip standalone ISO-TP multi-frame byte-count header lines like "014" or "00B"
+        if !t.contains(':') && t.len() <= 3 && t.chars().all(|c| c.is_ascii_hexdigit()) {
             continue;
         }
         let body = match t.split_once(':') {
@@ -621,6 +672,10 @@ pub fn parse_uds_22(raw: &str, hi: u8, lo: u8) -> Option<Vec<u8>> {
         {
             continue;
         }
+        // Skip standalone ISO-TP multi-frame byte-count header lines like "014" or "00B"
+        if !t.contains(':') && t.len() <= 3 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
         let body = match t.split_once(':') {
             Some((prefix, rest)) if prefix.len() <= 2 && prefix.chars().all(|c| c.is_ascii_hexdigit()) => {
                 rest
@@ -663,6 +718,10 @@ pub fn parse_vin(raw: &str) -> Option<String> {
         }
         // Skip ISO-TP length header line like "014"
         if t.len() <= 3 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        // Skip standalone ISO-TP multi-frame byte-count header lines like "014" or "00B"
+        if !t.contains(':') && t.len() <= 3 && t.chars().all(|c| c.is_ascii_hexdigit()) {
             continue;
         }
         let body = match t.split_once(':') {
@@ -1139,6 +1198,43 @@ pub fn request_finish_trip() {
     *svc.pending_cmd.lock().unwrap() = Some(ObdCommand::FinishTrip);
 }
 
+pub fn request_uds_scan() -> String {
+    let svc = service();
+    if is_sim_active(&svc) {
+        let mut live = svc.live.lock().unwrap();
+        let sim_uds = UdsScanResult {
+            scanned_at: now_unix_secs(),
+            can_addressing: "29-bit FCA (18DA10F1 · SIM)".into(),
+            ecu_part_number: Some("55275498".into()),
+            ecu_hw_number: Some("BOSCH EDC17C69".into()),
+            ecu_sw_version: Some("1037558214".into()),
+            ecu_odometer_km: Some(85_420),
+            oil_degradation_pct: Some(74.0),
+            oil_service_km_remaining: Some(11_200),
+            oil_temp_c: Some(91.0),
+            dpf_soot_pct: live.dpf_soot_pct.or(Some(36.4)),
+            dpf_temp_c: live.dpf_temp_c.or(Some(312.0)),
+            dpf_diff_mbar: Some(28.0),
+            dpf_last_regen_km: Some(412),
+            dpf_avg_regen_km: Some(540),
+            dpf_regen_count: Some(158),
+            dpf_regen_progress_pct: Some(if live.dpf_regen_active { 62.0 } else { 0.0 }),
+            injectors_mm3: vec![Some(-0.24), Some(0.18), Some(-0.11), Some(0.31)],
+            raw_dids: vec![
+                UdsRawEntry { did: "F187".into(), label: "Réf. pièce ECU".into(), hex: "3535323735343938".into(), decoded: "55275498".into() },
+                UdsRawEntry { did: "18E4".into(), label: "Colmatage FAP".into(), hex: "094A".into(), decoded: "36.4 %".into() },
+                UdsRawEntry { did: "2001".into(), label: "Odomètre ECU".into(), hex: "014DAC".into(), decoded: "85420 km".into() },
+                UdsRawEntry { did: "3812".into(), label: "Qualité huile".into(), hex: "4A".into(), decoded: "74 %".into() },
+            ],
+        };
+        live.uds = Some(sim_uds);
+        live.oil_c = Some(91.0);
+        return serde_json::to_string(&*live).unwrap_or_else(|_| "{}".into());
+    }
+    *svc.pending_cmd.lock().unwrap() = Some(ObdCommand::RunUdsScan);
+    live_json()
+}
+
 #[derive(Deserialize)]
 struct SimPayload {
     rpm: Option<f64>,
@@ -1332,7 +1428,7 @@ fn obd_worker_loop(svc: Arc<ObdService>) {
                         push_log(&svc, format!("Trajet terminé manuellement ({:.2} km)", trip.distance_km));
                     }
                 }
-                ObdCommand::ReadDtcs | ObdCommand::ClearDtcs => {}
+                ObdCommand::ReadDtcs | ObdCommand::ClearDtcs | ObdCommand::RunUdsScan => {}
             }
         }
 
@@ -1481,6 +1577,315 @@ fn discover_supported_pids(
 }
 
 #[cfg(target_os = "linux")]
+fn uds_bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join("")
+}
+
+#[cfg(target_os = "linux")]
+fn uds_bytes_to_ascii(bytes: &[u8]) -> Option<String> {
+    let s: String = bytes
+        .iter()
+        .copied()
+        .filter(|b| (0x20..=0x7E).contains(b))
+        .map(|b| b as char)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if s.len() >= 3 { Some(s) } else { None }
+}
+
+#[cfg(target_os = "linux")]
+fn uds_u16(b: &[u8]) -> Option<u16> {
+    if b.len() >= 2 { Some(u16::from(b[0]) * 256 + u16::from(b[1])) } else { None }
+}
+
+#[cfg(target_os = "linux")]
+fn uds_u24_or_u32(b: &[u8]) -> Option<u32> {
+    if b.len() >= 4 {
+        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    } else if b.len() == 3 {
+        Some((u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]))
+    } else if b.len() == 2 {
+        Some(u32::from(u16::from(b[0]) * 256 + u16::from(b[1])))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn uds_i16(b: &[u8]) -> Option<i16> {
+    if b.len() >= 2 { Some(i16::from_be_bytes([b[0], b[1]])) } else { None }
+}
+
+#[cfg(target_os = "linux")]
+fn run_uds_multijet_scan(
+    svc: &Arc<ObdService>,
+    transport: &mut dyn ElmTransport,
+    default_29bit: bool,
+) -> UdsScanResult {
+    push_log(svc, "Scan UDS MultiJet Pro (Service 22 lecture seule)…");
+
+    let mut use_29 = default_29bit;
+    let set_hdr = |t: &mut dyn ElmTransport, is29: bool| {
+        if is29 {
+            let _ = t.send_command("ATCP18", Duration::from_millis(600));
+            let _ = t.send_command("ATSHDA10F1", Duration::from_millis(700));
+        } else {
+            let _ = t.send_command("ATSH7E0", Duration::from_millis(700));
+        }
+    };
+    let restore_hdr = |t: &mut dyn ElmTransport, is29: bool| {
+        if is29 {
+            let _ = t.send_command("ATCP18", Duration::from_millis(600));
+            let _ = t.send_command("ATSHDB33F1", Duration::from_millis(700));
+        } else {
+            let _ = t.send_command("ATSH7DF", Duration::from_millis(700));
+        }
+    };
+
+    let query = |t: &mut dyn ElmTransport, hi: u8, lo: u8| -> Option<Vec<u8>> {
+        let cmd = format!("22{hi:02X}{lo:02X}");
+        let resp = t.send_command(&cmd, Duration::from_millis(1200)).ok()?;
+        parse_uds_22(&resp, hi, lo)
+    };
+
+    set_hdr(transport, use_29);
+    let mut part_bytes = query(transport, 0xF1, 0x87);
+    let mut soot_probe = query(transport, 0x18, 0xE4);
+    if part_bytes.is_none() && soot_probe.is_none() {
+        // Automatically retry with alternate CAN addressing (11-bit 7E0 <-> 29-bit FCA 18DA10F1)
+        use_29 = !use_29;
+        set_hdr(transport, use_29);
+        part_bytes = query(transport, 0xF1, 0x87);
+        soot_probe = query(transport, 0x18, 0xE4);
+    }
+
+    let mut res = UdsScanResult {
+        scanned_at: now_unix_secs(),
+        can_addressing: if use_29 {
+            "29-bit FCA (18DA10F1)".into()
+        } else {
+            "11-bit CAN (7E0)".into()
+        },
+        injectors_mm3: vec![None, None, None, None],
+        ..Default::default()
+    };
+
+    let mut record = |did: &str, label: &str, bytes: &[u8], decoded: String| {
+        res.raw_dids.push(UdsRawEntry {
+            did: did.into(),
+            label: label.into(),
+            hex: uds_bytes_to_hex(bytes),
+            decoded,
+        });
+    };
+
+    // 1. ECU Identification (ISO 14229 standard DIDs)
+    if let Some(ref b) = part_bytes {
+        if let Some(s) = uds_bytes_to_ascii(b) {
+            res.ecu_part_number = Some(s.clone());
+            record("F187", "Réf. pièce ECU", b, s);
+        }
+    }
+    for (hi, lo, label) in [(0xF1, 0x91, "Matériel ECU"), (0xF1, 0x8A, "Fournisseur ECU")] {
+        if res.ecu_hw_number.is_none() {
+            if let Some(b) = query(transport, hi, lo) {
+                if let Some(s) = uds_bytes_to_ascii(&b) {
+                    res.ecu_hw_number = Some(s.clone());
+                    record(&format!("{hi:02X}{lo:02X}"), label, &b, s);
+                }
+            }
+        }
+    }
+    for (hi, lo, label) in [(0xF1, 0x94, "Logiciel ECU"), (0xF1, 0x95, "Version SW ECU")] {
+        if res.ecu_sw_version.is_none() {
+            if let Some(b) = query(transport, hi, lo) {
+                if let Some(s) = uds_bytes_to_ascii(&b) {
+                    res.ecu_sw_version = Some(s.clone());
+                    record(&format!("{hi:02X}{lo:02X}"), label, &b, s);
+                }
+            }
+        }
+    }
+
+    // 2. ECU Odometer (FCA EDC17C69 / MJD 8F3/9DF)
+    for (hi, lo) in [(0x20, 0x01), (0x29, 0x5A), (0x10, 0x02)] {
+        if res.ecu_odometer_km.is_none() {
+            if let Some(b) = query(transport, hi, lo) {
+                if let Some(raw) = uds_u24_or_u32(&b) {
+                    let km = if (500..=600_000).contains(&raw) {
+                        Some(raw)
+                    } else if (5_000..=6_000_000).contains(&raw) {
+                        Some(raw / 10)
+                    } else {
+                        None
+                    };
+                    if let Some(k) = km {
+                        res.ecu_odometer_km = Some(k);
+                        record(&format!("{hi:02X}{lo:02X}"), "Odomètre ECU", &b, format!("{k} km"));
+                    } else {
+                        record(&format!("{hi:02X}{lo:02X}"), "Odomètre brut", &b, format!("{raw}"));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. FAP / DPF Health (soot, temp, diff pressure, regen counters & intervals)
+    if let Some(ref b) = soot_probe {
+        if let Some(raw) = uds_u16(b) {
+            let pct = ((f64::from(raw) * 1000.0 / 65535.0) * 10.0).round() / 10.0;
+            if (0.0..=150.0).contains(&pct) {
+                res.dpf_soot_pct = Some(pct);
+                record("18E4", "Colmatage FAP", b, format!("{pct:.1} %"));
+            }
+        } else if !b.is_empty() {
+            let pct = f64::from(b[0]);
+            if (0.0..=150.0).contains(&pct) {
+                res.dpf_soot_pct = Some(pct);
+                record("18E4", "Colmatage FAP", b, format!("{pct:.0} %"));
+            }
+        }
+    }
+    if let Some(b) = query(transport, 0x18, 0xDE) {
+        if let Some(raw) = uds_u16(&b) {
+            let c = (f64::from(raw) * 0.02 - 40.0).round();
+            if (-40.0..=1100.0).contains(&c) {
+                res.dpf_temp_c = Some(c);
+                record("18DE", "Température FAP", &b, format!("{c:.0} °C"));
+            }
+        }
+    }
+    if let Some(b) = query(transport, 0x18, 0xE0) {
+        if let Some(raw) = uds_i16(&b) {
+            let mbar = f64::from(raw);
+            if (-50.0..=1200.0).contains(&mbar) {
+                res.dpf_diff_mbar = Some(mbar);
+                record("18E0", "Pression diff. FAP", &b, format!("{mbar:.0} mbar"));
+            }
+        }
+    }
+    if let Some(b) = query(transport, 0x18, 0xE5) {
+        if let Some(raw) = uds_u24_or_u32(&b) {
+            let km = if raw <= 20_000 { raw } else { raw / 10 };
+            res.dpf_last_regen_km = Some(km);
+            record("18E5", "Dist. depuis régén FAP", &b, format!("{km} km"));
+        }
+    }
+    if let Some(b) = query(transport, 0x18, 0xE6) {
+        if let Some(raw) = uds_u24_or_u32(&b) {
+            let km = if raw <= 20_000 { raw } else { raw / 10 };
+            res.dpf_avg_regen_km = Some(km);
+            record("18E6", "Moyenne entre régén FAP", &b, format!("{km} km"));
+        }
+    }
+    if let Some(b) = query(transport, 0x18, 0xE8) {
+        if let Some(raw) = uds_u16(&b) {
+            res.dpf_regen_count = Some(u32::from(raw));
+            record("18E8", "Nb régénérations FAP", &b, format!("{raw}"));
+        }
+    }
+    if let Some(b) = query(transport, 0x18, 0xA4) {
+        if let Some(raw) = uds_u16(&b) {
+            let pct = ((f64::from(raw) * 100.0 / 65535.0) * 10.0).round() / 10.0;
+            res.dpf_regen_progress_pct = Some(pct);
+            record("18A4", "Avancement régén FAP", &b, format!("{pct:.1} %"));
+        } else if !b.is_empty() {
+            let pct = f64::from(b[0]).min(100.0);
+            res.dpf_regen_progress_pct = Some(pct);
+            record("18A4", "Avancement régén FAP", &b, format!("{pct:.0} %"));
+        }
+    }
+
+    // 4. Oil Degradation, Oil Service km, & Oil Temp
+    for (hi, lo) in [(0x38, 0x12), (0x18, 0xE9)] {
+        if res.oil_degradation_pct.is_none() {
+            if let Some(b) = query(transport, hi, lo) {
+                let pct = if b.len() == 1 {
+                    Some(f64::from(b[0]))
+                } else if let Some(raw) = uds_u16(&b) {
+                    if raw <= 100 { Some(f64::from(raw)) } else { Some(((f64::from(raw) * 100.0 / 65535.0) * 10.0).round() / 10.0) }
+                } else { None };
+                if let Some(p) = pct.filter(|p| (0.0..=100.0).contains(p)) {
+                    res.oil_degradation_pct = Some(p);
+                    record(&format!("{hi:02X}{lo:02X}"), "Dégradation huile", &b, format!("{p:.0} %"));
+                }
+            }
+        }
+    }
+    for (hi, lo) in [(0x38, 0x13), (0x20, 0x04)] {
+        if res.oil_service_km_remaining.is_none() {
+            if let Some(b) = query(transport, hi, lo) {
+                if let Some(raw) = uds_u24_or_u32(&b) {
+                    if raw <= 60_000 {
+                        res.oil_service_km_remaining = Some(raw);
+                        record(&format!("{hi:02X}{lo:02X}"), "Km avant vidange", &b, format!("{raw} km"));
+                    }
+                }
+            }
+        }
+    }
+    for (hi, lo) in [(0x19, 0x4F), (0x10, 0x09)] {
+        if res.oil_temp_c.is_none() {
+            if let Some(b) = query(transport, hi, lo) {
+                let c = if let Some(raw) = uds_u16(&b) {
+                    let v1 = (f64::from(raw) * 0.02 - 40.0).round();
+                    let v2 = (f64::from(raw) * 0.1 - 40.0).round();
+                    if (-20.0..=155.0).contains(&v1) { Some(v1) } else if (-20.0..=155.0).contains(&v2) { Some(v2) } else { None }
+                } else if b.len() == 1 {
+                    let v = f64::from(b[0]) - 40.0;
+                    if (-20.0..=155.0).contains(&v) { Some(v) } else { None }
+                } else { None };
+                if let Some(temp) = c {
+                    res.oil_temp_c = Some(temp);
+                    record(&format!("{hi:02X}{lo:02X}"), "Température huile", &b, format!("{temp:.0} °C"));
+                }
+            }
+        }
+    }
+
+    // 5. Diesel MultiJet 4-Cylinder Injector Corrections (mm³/stroke)
+    let mut got_inj = false;
+    for (idx, lo) in [0x35u8, 0x36, 0x37, 0x38].iter().enumerate() {
+        if let Some(b) = query(transport, 0x19, *lo) {
+            if let Some(raw) = uds_i16(&b) {
+                let val = ((f64::from(raw) * 0.01) * 100.0).round() / 100.0;
+                if (-8.0..=8.0).contains(&val) {
+                    res.injectors_mm3[idx] = Some(val);
+                    got_inj = true;
+                    record(&format!("19{lo:02X}"), &format!("Injecteur Cyl. {}", idx + 1), &b, format!("{val:+.2} mm³"));
+                }
+            }
+        }
+    }
+    if !got_inj {
+        // Fallback for Magneti Marelli MJD 8F3 injector DIDs (18B0..18B3)
+        for (idx, lo) in [0xB0u8, 0xB1, 0xB2, 0xB3].iter().enumerate() {
+            if let Some(b) = query(transport, 0x18, *lo) {
+                if let Some(raw) = uds_i16(&b) {
+                    let val = ((f64::from(raw) * 0.01) * 100.0).round() / 100.0;
+                    if (-8.0..=8.0).contains(&val) {
+                        res.injectors_mm3[idx] = Some(val);
+                        record(&format!("18{lo:02X}"), &format!("Injecteur Cyl. {}", idx + 1), &b, format!("{val:+.2} mm³"));
+                    }
+                }
+            }
+        }
+    }
+
+    restore_hdr(transport, default_29bit);
+    push_log(
+        svc,
+        format!(
+            "Scan UDS terminé : {} DIDs lus ({})",
+            res.raw_dids.len(),
+            res.can_addressing
+        ),
+    );
+    res
+}
+
+#[cfg(target_os = "linux")]
 fn run_elm_session(
     svc: &Arc<ObdService>,
     transport: &mut dyn ElmTransport,
@@ -1625,6 +2030,21 @@ fn run_elm_session(
                         svc.live.lock().unwrap().active_trip = None;
                         push_log(svc, format!("Trajet terminé manuellement ({:.2} km)", trip.distance_km));
                     }
+                }
+                ObdCommand::RunUdsScan => {
+                    let uds = run_uds_multijet_scan(svc, transport, is_29bit_can);
+                    let mut live = svc.live.lock().unwrap();
+                    if let Some(oil) = uds.oil_temp_c {
+                        live.oil_c = Some(oil);
+                    }
+                    if let Some(soot) = uds.dpf_soot_pct {
+                        live.dpf_soot_pct = Some(soot);
+                    }
+                    if let Some(temp) = uds.dpf_temp_c {
+                        live.dpf_temp_c = Some(temp);
+                    }
+                    live.uds = Some(uds);
+                    write_dashboard_obd_snapshot(&live);
                 }
             }
         }
