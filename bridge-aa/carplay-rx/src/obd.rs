@@ -830,6 +830,7 @@ struct ActiveTrip {
     harsh_events: u32,
     last_speed_kmh: f64,
     last_gps: Option<(f64, f64)>,
+    last_runtime_s: Option<u32>,
     has_gps: bool,
     has_obd: bool,
 }
@@ -837,9 +838,15 @@ struct ActiveTrip {
 impl ActiveTrip {
     fn start(now: u64, live: &ObdLiveSnapshot) -> Self {
         let now_i = Instant::now();
+        // Guarantee a unique trip ID even if clock hasn't synced yet after reboot.
+        let dir = trips_dir();
+        let mut ts = now;
+        while dir.join(format!("trip-{ts}.json")).exists() {
+            ts = ts.saturating_add(1);
+        }
         Self {
-            id: format!("trip-{now}"),
-            started_at: now,
+            id: format!("trip-{ts}"),
+            started_at: ts,
             started_instant: now_i,
             last_active_at: now_i,
             last_sample_at: now_i - Duration::from_secs(2),
@@ -861,6 +868,7 @@ impl ActiveTrip {
             harsh_events: 0,
             last_speed_kmh: 0.0,
             last_gps: live.gps.as_ref().map(|g| (g.lat, g.lon)),
+            last_runtime_s: live.runtime_s,
             has_gps: live.gps.is_some(),
             has_obd: live.connected,
         }
@@ -886,12 +894,19 @@ impl ActiveTrip {
             .saturating_duration_since(self.last_sample_at)
             .as_secs_f64()
             .clamp(0.1, 5.0);
-        let spd = live
-            .speed_kmh
-            .or_else(|| live.gps.as_ref().and_then(|g| g.speed_kmh))
-            .unwrap_or(0.0)
-            .max(0.0);
-        let rpm = live.rpm.unwrap_or(0.0).max(0.0);
+        let spd = if live.connected {
+            live.speed_kmh
+                .or_else(|| live.gps.as_ref().and_then(|g| g.speed_kmh))
+        } else {
+            live.gps.as_ref().and_then(|g| g.speed_kmh)
+        }
+        .unwrap_or(0.0)
+        .max(0.0);
+        let rpm = if live.connected {
+            live.rpm.unwrap_or(0.0).max(0.0)
+        } else {
+            0.0
+        };
 
         // 0-50 & 0-100 km/h automatic launch detector.
         if spd <= 2.0 {
@@ -994,7 +1009,11 @@ impl ActiveTrip {
     }
 
     fn summary(&self) -> TripSummary {
-        let duration_s = self.started_instant.elapsed().as_secs().max(1);
+        let duration_s = self
+            .last_active_at
+            .saturating_duration_since(self.started_instant)
+            .as_secs()
+            .max(1);
         let ended_at = self.started_at.saturating_add(duration_s);
         let avg_speed = if duration_s > 0 {
             self.distance_km / (duration_s as f64 / 3600.0)
@@ -1468,6 +1487,16 @@ fn obd_worker_loop(svc: Arc<ObdService>) {
                     {
                         let mut live = svc.live.lock().unwrap();
                         live.connected = false;
+                        // Clear stale live driving metrics so parked cars never look "engine running".
+                        live.rpm = None;
+                        live.speed_kmh = None;
+                        live.fuel_rate_lph = None;
+                        live.fuel_l_per_100km = None;
+                        live.boost_bar = None;
+                        live.gear = None;
+                        live.power_hp = None;
+                        live.torque_nm = None;
+                        live.runtime_s = None;
                         if live.adapter_mac.is_some() {
                             live.state = "reconnecting".into();
                         } else {
@@ -1495,12 +1524,36 @@ fn obd_worker_loop(svc: Arc<ObdService>) {
 }
 
 fn update_trip_state(active_trip: &mut Option<ActiveTrip>, live: &mut ObdLiveSnapshot) {
-    let spd = live
-        .speed_kmh
-        .or_else(|| live.gps.as_ref().and_then(|g| g.speed_kmh))
-        .unwrap_or(0.0);
-    let rpm = live.rpm.unwrap_or(0.0);
+    // Only trust OBD RPM/speed while the ECU link is actually live; otherwise rely solely on fresh GPS (<12 s).
+    let spd = if live.connected {
+        live.speed_kmh
+            .or_else(|| live.gps.as_ref().and_then(|g| g.speed_kmh))
+            .unwrap_or(0.0)
+    } else {
+        live.gps.as_ref().and_then(|g| g.speed_kmh).unwrap_or(0.0)
+    };
+    let rpm = if live.connected {
+        live.rpm.unwrap_or(0.0)
+    } else {
+        0.0
+    };
     let moving_or_running = spd >= 2.0 || rpm >= 450.0;
+
+    // Hardware engine-restart detection via PID 011F (runtime since engine start):
+    // if runtime dropped significantly, the driver turned off the ignition and restarted for a new trip!
+    if let (Some(trip), Some(cur_rt)) = (active_trip.as_ref(), live.runtime_s) {
+        if let Some(prev_rt) = trip.last_runtime_s {
+            if prev_rt >= 20 && cur_rt.saturating_add(15) < prev_rt {
+                eprintln!(
+                    "OBD_TRIP_SPLIT_RESTART id={} prev_rt={prev_rt}s cur_rt={cur_rt}s km={:.2}",
+                    trip.id, trip.distance_km
+                );
+                trip.save();
+                *active_trip = None;
+                live.active_trip = None;
+            }
+        }
+    }
 
     if active_trip.is_none() && moving_or_running {
         let trip = ActiveTrip::start(now_unix_secs(), live);
@@ -1510,6 +1563,9 @@ fn update_trip_state(active_trip: &mut Option<ActiveTrip>, live: &mut ObdLiveSna
 
     if let Some(trip) = active_trip.as_mut() {
         trip.rebase_clock_if_needed();
+        if let Some(rt) = live.runtime_s {
+            trip.last_runtime_s = Some(rt);
+        }
         trip.ingest(live);
 
         // Save immediately if engine just stopped (so power loss never loses the end of a trip)
@@ -1523,8 +1579,14 @@ fn update_trip_state(active_trip: &mut Option<ActiveTrip>, live: &mut ObdLiveSna
         let summary = trip.summary();
         live.active_trip = Some(summary);
 
-        // Auto-finalize after 60 s with engine off & vehicle stopped (Start&Stop/red lights < 60 s stay intact).
-        if trip.last_active_at.elapsed() >= Duration::from_secs(60) {
+        // Auto-finalize faster (20 s) when ECU/OBD link dropped (ignition OFF),
+        // or after 60 s when still connected with engine off & vehicle stopped (tolerates Start&Stop).
+        let idle_timeout = if live.connected {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(20)
+        };
+        if trip.last_active_at.elapsed() >= idle_timeout {
             eprintln!("OBD_TRIP_END id={} km={:.2}", trip.id, trip.distance_km);
             trip.save();
             *active_trip = None;
@@ -2479,6 +2541,18 @@ fn run_elm_session(
             consec_errors = 0;
         } else {
             consec_errors += 1;
+            if consec_errors >= 3 {
+                // ECU stopped answering (ignition cut): zero out stale RPM/speed right away
+                // so the trip auto-finalizer starts counting down immediately instead of holding 820 rpm!
+                let mut live = svc.live.lock().unwrap();
+                live.rpm = Some(0.0);
+                live.speed_kmh = Some(0.0);
+                live.fuel_rate_lph = None;
+                live.fuel_l_per_100km = None;
+                live.gear = Some("N".into());
+                live.power_hp = Some(0.0);
+                live.torque_nm = Some(0.0);
+            }
             if consec_errors >= 12 {
                 eprintln!("OBD_LOST_LINK after {consec_errors} empty cycles");
                 return;
