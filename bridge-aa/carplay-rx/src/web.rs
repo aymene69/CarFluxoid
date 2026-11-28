@@ -325,6 +325,18 @@ fn handle(mut s:TcpStream)->std::io::Result<()>{
    }
   },
   ("POST","/api/obd/sim/stop")=>reply(&mut s,"200 OK","application/json; charset=utf-8",crate::obd::stop_simulation().as_bytes()),
+  ("POST","/api/alert/test")=>{
+   let kind=query.split('&').find_map(|p|p.strip_prefix("kind=")).unwrap_or("fap");
+   let payload=match kind{
+    "warm"=>"info|MOTEUR À TEMPÉRATURE|Liquide de refroidissement à 80 °C · Moteur prêt\n",
+    "overheat"=>"critical|SURCHAUFFE MOTEUR !|Température eau critique : 104 °C · Ralentissez !\n",
+    "dtc"=>"critical|NOUVEAU DÉFAUT : P0401|Débit EGR insuffisant (vanne encrassée)\n",
+    _=>"critical|RÉGÉNÉRATION FAP EN COURS|Échappement 624 °C · Ne coupez pas le moteur !\n",
+   };
+   let dst=bridge_dir().join("alert-test.txt");
+   let _=std::fs::write(&dst,payload);
+   reply(&mut s,"200 OK","application/json; charset=utf-8",br#"{"ok":true}"#);
+  },
   ("POST","/api/time")=>{
    match extract_unix_body(body).ok_or_else(||"Timestamp unix invalide.".to_string()).and_then(crate::obd::sync_system_time){
     Ok(ts)=>reply(&mut s,"200 OK","application/json; charset=utf-8",format!(r#"{{"unix":{ts}}}"#).as_bytes()),

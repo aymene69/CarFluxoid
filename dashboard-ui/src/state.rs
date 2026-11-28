@@ -928,6 +928,27 @@ impl DashboardController {
             }
         }
 
+        // Check manual test flash trigger written by POST /api/alert/test (works even with real Vgate or CarPlay active!)
+        let trigger_path = self.paths.bridge.join("alert-test.txt");
+        if let Ok(text) = fs::read_to_string(&trigger_path) {
+            let _ = fs::remove_file(&trigger_path);
+            let mut parts = text.trim().splitn(3, '|');
+            let severity = parts.next().unwrap_or("critical").to_string();
+            let title = parts.next().unwrap_or("RÉGÉNÉRATION FAP EN COURS").to_string();
+            let subtitle = parts
+                .next()
+                .unwrap_or("Échappement 624 °C · Ne coupez pas le moteur !")
+                .to_string();
+            let flash = AlertFlash {
+                active: true,
+                severity,
+                title,
+                subtitle,
+            };
+            am.active = Some((flash.clone(), now));
+            return (flash, Some(9));
+        }
+
         let raw = Self::read_trimmed(&self.paths.bridge.join("obd.json")).unwrap_or_default();
         let connected = json_bool(&raw, "connected");
         if connected {

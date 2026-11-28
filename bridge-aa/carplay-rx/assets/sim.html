@@ -127,6 +127,10 @@
       <button class="tbtn warn" id="bRegen" type="button">🔥 Régén FAP : OFF</button>
       <button class="tbtn" id="bRefuel" type="button">⛽ Simuler +25% plein</button>
     </div>
+    <div class="toggles" style="margin-top:8px">
+      <button class="tbtn danger" id="bFlashFap" type="button">🚨 Flash FAP sur CarPlay</button>
+      <button class="tbtn" id="bFlashWarm" type="button">✅ Flash 80 °C sur CarPlay</button>
+    </div>
     <div class="row" style="margin-top:10px"><span>Cadence d'envoi vers le Pi</span><strong id="vRate">5 Hz (200 ms)</strong></div>
     <div class="rates" id="rateBar">
       <button class="rbtn" data-ms="500" type="button">2 Hz</button>
@@ -193,6 +197,8 @@ $('bRefuel').onclick=()=>{
   $('vFuel').textContent=Math.round(st.fuel)+' %';
   st.running=true;
 };
+$('bFlashFap').onclick=()=>{fetch('/api/alert/test?kind=fap',{method:'POST'}).catch(()=>{});};
+$('bFlashWarm').onclick=()=>{fetch('/api/alert/test?kind=warm',{method:'POST'}).catch(()=>{});};
 
 function updateGearBtns(){
   document.querySelectorAll('#gearBar .gbtn').forEach(b=>{
