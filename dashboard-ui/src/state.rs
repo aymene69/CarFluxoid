@@ -582,19 +582,19 @@ impl DashboardController {
 
         // Longitudinal & lateral G-force (direct from OBD/sim JSON, or derived from speed delta)
         if let Some(gl) = json_g_lon {
-            p.smooth_g_lon = p.smooth_g_lon * 0.35 + gl.clamp(-1.5, 1.5) * 0.65;
+            p.smooth_g_lon = p.smooth_g_lon * 0.25 + gl.clamp(-1.5, 1.5) * 0.75;
         } else if let Some(prev_t) = p.last_sample_at {
             let dt = now.saturating_duration_since(prev_t).as_secs_f64();
             if dt >= 0.06 && dt <= 2.5 {
                 let dv_ms = (spd - p.last_speed_kmh) / 3.6;
                 let inst_g = (dv_ms / (dt * 9.81)).clamp(-1.3, 1.3);
-                p.smooth_g_lon = p.smooth_g_lon * 0.55 + inst_g * 0.45;
+                p.smooth_g_lon = p.smooth_g_lon * 0.45 + inst_g * 0.55;
             } else if dt > 2.5 {
                 p.smooth_g_lon *= 0.5;
             }
         }
         if let Some(gt) = json_g_lat {
-            p.smooth_g_lat = p.smooth_g_lat * 0.35 + gt.clamp(-1.5, 1.5) * 0.65;
+            p.smooth_g_lat = p.smooth_g_lat * 0.25 + gt.clamp(-1.5, 1.5) * 0.75;
         } else {
             p.smooth_g_lat *= 0.85;
         }

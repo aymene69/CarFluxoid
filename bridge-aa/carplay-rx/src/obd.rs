@@ -2,7 +2,7 @@
 //! consumption estimator, French DTC decoder, and automatic GPS+OBD trip recorder.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -427,6 +427,77 @@ pub fn parse_mode01_bytes(raw: &str, pid: u8) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Standard ISO 15031-5 byte length for Mode 01 PIDs used in CAN multi-PID batching.
+pub fn mode01_pid_len(pid: u8) -> Option<usize> {
+    match pid {
+        0x04 | 0x05 | 0x0B | 0x0D | 0x0F | 0x11 | 0x2C | 0x2D | 0x2F | 0x30 | 0x33 | 0x46
+        | 0x49 | 0x5C => Some(1),
+        0x0C | 0x10 | 0x1F | 0x23 | 0x31 | 0x3C | 0x42 | 0x5E => Some(2),
+        0x00 | 0x20 | 0x34 | 0x40 | 0x60 | 0x80 => Some(4),
+        _ => None,
+    }
+}
+
+/// Parse an ISO 15765-4 CAN multi-PID Mode 01 response (e.g. `010C0D040B1049` -> `41 0C xx xx 0D xx ...`).
+pub fn parse_mode01_multi(raw: &str, requested: &[u8]) -> HashMap<u8, Vec<u8>> {
+    let mut out = HashMap::new();
+    let mut hex = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("SEARCHING")
+            || trimmed.starts_with("NO DATA")
+            || trimmed.starts_with("STOPPED")
+            || trimmed.starts_with("UNABLE")
+            || trimmed.starts_with("ERROR")
+            || trimmed.starts_with('?')
+        {
+            continue;
+        }
+        // Skip standalone ISO-TP multi-frame byte-count header lines like "010" or "00E"
+        if !trimmed.contains(':') && trimmed.len() <= 3 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let body = match trimmed.split_once(':') {
+            Some((prefix, rest)) if prefix.len() <= 2 && prefix.chars().all(|c| c.is_ascii_hexdigit()) => {
+                rest
+            }
+            _ => trimmed,
+        };
+        for c in body.chars() {
+            if c.is_ascii_hexdigit() {
+                hex.push(c.to_ascii_uppercase());
+            }
+        }
+    }
+    if hex.len() < 6 || !hex.len().is_multiple_of(2) {
+        return out;
+    }
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect();
+    let Some(start) = bytes.iter().position(|&b| b == 0x41) else {
+        return out;
+    };
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let pid = bytes[i];
+        if !requested.contains(&pid) {
+            break;
+        }
+        let Some(len) = mode01_pid_len(pid) else {
+            break;
+        };
+        if i + 1 + len > bytes.len() {
+            break;
+        }
+        out.insert(pid, bytes[i + 1..i + 1 + len].to_vec());
+        i += 1 + len;
+    }
+    out
 }
 
 /// Decode supported PIDs from a 4-byte bitmap response to 0100/0120/0140/0160.
@@ -2154,7 +2225,7 @@ fn run_elm_session(
     active_trip: &mut Option<ActiveTrip>,
 ) {
     std::thread::sleep(Duration::from_millis(250));
-    let init_cmds = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATSP0"];
+    let init_cmds = ["ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATAT2", "ATSP0"];
     let mut elm_ver = None;
     for cmd in init_cmds {
         let timeout = if cmd == "ATZ" {
@@ -2245,11 +2316,72 @@ fn run_elm_session(
     // Probe ELM327 fast-return digit (`010C1` = return immediately after 1 CAN frame instead of waiting ATST).
     let fast_suffix: &'static str = match transport.send_command("010C1", Duration::from_millis(800)) {
         Ok(r) if parse_mode01_bytes(&r, 0x0C).is_some_and(|d| d.len() >= 2) => {
-            push_log(svc, "Mode rapide ELM327 activé (01xx1 -> ~8-10 Hz)");
+            push_log(svc, "Mode rapide ELM327 activé (01xx1)");
             "1"
         }
         _ => "",
     };
+
+    // Probe ISO 15765-4 CAN Multi-PID Fast Communication (up to 6 PIDs in ONE command!).
+    let mut multi_fast_pids: Vec<u8> = Vec::new();
+    let mut multi_fast_cmd = String::new();
+    let mut multi_fast_fails: u8 = 0;
+    {
+        let mut full_batch: Vec<u8> = [0x0Cu8, 0x0D, 0x04, 0x0B, 0x10, 0x49]
+            .into_iter()
+            .filter(|p| supported.contains(p))
+            .take(6)
+            .collect();
+        if !full_batch.contains(&0x0C) { full_batch.insert(0, 0x0C); }
+        if !full_batch.contains(&0x0D) { full_batch.insert(1.min(full_batch.len()), 0x0D); }
+        full_batch.truncate(6);
+
+        let build_cmd = |pids: &[u8], single_frame_ok: bool| -> String {
+            let mut s = String::from("01");
+            for &p in pids {
+                s.push_str(&format!("{p:02X}"));
+            }
+            if single_frame_ok && pids.len() == 2 && !fast_suffix.is_empty() {
+                s.push_str(fast_suffix);
+            }
+            s
+        };
+
+        if full_batch.len() >= 3 {
+            let cmd = build_cmd(&full_batch, false);
+            if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(1100)) {
+                let parsed = parse_mode01_multi(&r, &full_batch);
+                if parsed.contains_key(&0x0C) && parsed.contains_key(&0x0D) {
+                    let ok_pids: Vec<u8> = full_batch.into_iter().filter(|p| parsed.contains_key(p)).collect();
+                    multi_fast_cmd = build_cmd(&ok_pids, false);
+                    push_log(
+                        svc,
+                        format!(
+                            "Transmission rapide Multi-PID activée ({} -> {} PIDs/trame !)",
+                            multi_fast_cmd,
+                            ok_pids.len()
+                        ),
+                    );
+                    multi_fast_pids = ok_pids;
+                }
+            }
+        }
+        if multi_fast_pids.is_empty() {
+            let pair = vec![0x0Cu8, 0x0D];
+            let cmd = build_cmd(&pair, true);
+            if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(900)) {
+                let parsed = parse_mode01_multi(&r, &pair);
+                if parsed.contains_key(&0x0C) && parsed.contains_key(&0x0D) {
+                    multi_fast_cmd = cmd;
+                    multi_fast_pids = pair;
+                    push_log(
+                        svc,
+                        format!("Transmission rapide Dual-PID activée ({multi_fast_cmd} -> RPM+Vitesse 1 trame)"),
+                    );
+                }
+            }
+        }
+    }
 
     {
         let mut live = svc.live.lock().unwrap();
@@ -2276,8 +2408,9 @@ fn run_elm_session(
     let mut last_slow_step = Instant::now() - Duration::from_secs(5);
     let mut last_uds = Instant::now() - Duration::from_secs(60);
     let mut consec_errors = 0u32;
-    let mut prev_g_at: Option<Instant> = None;
-    let mut prev_g_spd: f64 = 0.0;
+    let mut speed_history: VecDeque<(Instant, f64)> = VecDeque::with_capacity(24);
+    let mut prev_gps_at: Option<Instant> = None;
+    let mut prev_gps_ts: u64 = 0;
     let mut prev_g_bearing: Option<f64> = None;
     let mut smooth_g_lon: f64 = 0.0;
     let mut smooth_g_lat: f64 = 0.0;
@@ -2390,40 +2523,83 @@ fn run_elm_session(
         let mut dist_since_clear_km = None;
         let mut warmups_since_clear = None;
 
-        // Priority tier (EVERY cycle -> ~8-10 Hz): RPM (010C) + Speed (010D).
-        if should_poll(0x0C, &supported, &probed_failures) {
-            let mut got = false;
-            let cmd = format!("010C{fast_suffix}");
-            if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(650)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x0C) {
-                    if d.len() >= 2 {
+        // Priority tier: ISO 15765-4 CAN Multi-PID Fast Communication (15-20 Hz!) when supported,
+        // otherwise single-PID fast-return (`010C1` + `010D1` + 1 rotating secondary PID).
+        let mut multi_ok = false;
+        if !multi_fast_pids.is_empty() {
+            if let Ok(r) = transport.send_command(&multi_fast_cmd, Duration::from_millis(800)) {
+                let parsed = parse_mode01_multi(&r, &multi_fast_pids);
+                if parsed.contains_key(&0x0C) || parsed.contains_key(&0x0D) {
+                    multi_ok = true;
+                    multi_fast_fails = 0;
+                    ok_this_cycle = true;
+                    if let Some(d) = parsed.get(&0x0C).filter(|d| d.len() >= 2) {
                         rpm = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 4.0);
-                        ok_this_cycle = true;
-                        got = true;
                     }
-                }
-            }
-            mark_probe(0x0C, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x0D, &supported, &probed_failures) {
-            let mut got = false;
-            let cmd = format!("010D{fast_suffix}");
-            if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(650)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x0D) {
-                    if !d.is_empty() {
+                    if let Some(d) = parsed.get(&0x0D).filter(|d| !d.is_empty()) {
                         speed = Some(f64::from(d[0]));
-                        ok_this_cycle = true;
-                        got = true;
+                    }
+                    if let Some(d) = parsed.get(&0x04).filter(|d| !d.is_empty()) {
+                        load = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                    }
+                    if let Some(d) = parsed.get(&0x0B).filter(|d| !d.is_empty()) {
+                        map = Some(f64::from(d[0]));
+                    }
+                    if let Some(d) = parsed.get(&0x10).filter(|d| d.len() >= 2) {
+                        maf = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 100.0);
+                    }
+                    if let Some(d) = parsed.get(&0x49).filter(|d| !d.is_empty()) {
+                        pedal_pct = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
                     }
                 }
             }
-            mark_probe(0x0D, got, &mut supported, &mut probed_failures);
+            if !multi_ok {
+                multi_fast_fails = multi_fast_fails.saturating_add(1);
+                if multi_fast_fails >= 3 {
+                    push_log(svc, "Multi-PID instable -> bascule auto sur mode simple 01xx1");
+                    multi_fast_pids.clear();
+                }
+            }
         }
 
-        // Rotate ONE secondary fast PID per cycle (Load, MAP, MAF, Pedal, Lambda, Throttle, FuelRate).
+        if !multi_ok {
+            if should_poll(0x0C, &supported, &probed_failures) {
+                let mut got = false;
+                let cmd = format!("010C{fast_suffix}");
+                if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(650)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x0C) {
+                        if d.len() >= 2 {
+                            rpm = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 4.0);
+                            ok_this_cycle = true;
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x0C, got, &mut supported, &mut probed_failures);
+            }
+            if should_poll(0x0D, &supported, &probed_failures) {
+                let mut got = false;
+                let cmd = format!("010D{fast_suffix}");
+                if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(650)) {
+                    if let Some(d) = parse_mode01_bytes(&r, 0x0D) {
+                        if !d.is_empty() {
+                            speed = Some(f64::from(d[0]));
+                            ok_this_cycle = true;
+                            got = true;
+                        }
+                    }
+                }
+                mark_probe(0x0D, got, &mut supported, &mut probed_failures);
+            }
+        }
+
+        // Rotate ONE secondary fast PID not already covered by Multi-PID (e.g. Lambda 0x34, Throttle 0x11, FuelRate 0x5E).
         for _ in 0..FAST_ROT_PIDS.len() {
             let pid = FAST_ROT_PIDS[fast_rot_idx % FAST_ROT_PIDS.len()];
             fast_rot_idx = (fast_rot_idx + 1) % FAST_ROT_PIDS.len();
+            if multi_ok && multi_fast_pids.contains(&pid) {
+                continue;
+            }
             if !should_poll(pid, &supported, &probed_failures) {
                 continue;
             }
@@ -2861,35 +3037,68 @@ fn run_elm_session(
             } else {
                 None
             };
-            // Estimate 2D G-force: longitudinal from OBD speed derivative, lateral from Uconnect GPS bearing rate
+            // Estimate 2D G-force:
+            // - Longitudinal: 380 ms sliding velocity window (smooths 1 km/h OBD quantization at 15+ Hz)
+            // - Lateral: Uconnect GPS bearing rate (only updates on fresh GPS fix so 1 Hz GPS isn't zeroed between ticks)
             let g_now = Instant::now();
-            if let Some(prev_t) = prev_g_at {
-                let dt = g_now.saturating_duration_since(prev_t).as_secs_f64();
-                if (0.08..=2.5).contains(&dt) {
-                    let dv_ms = (spd_for_cons - prev_g_spd) / 3.6;
+            speed_history.push_back((g_now, spd_for_cons));
+            while speed_history.len() > 20
+                || speed_history
+                    .front()
+                    .is_some_and(|(t, _)| g_now.saturating_duration_since(*t) > Duration::from_millis(750))
+            {
+                speed_history.pop_front();
+            }
+            // Pick oldest sample >= 280 ms ago (or oldest available if >= 120 ms)
+            let ref_sample = speed_history
+                .iter()
+                .rev()
+                .find(|(t, _)| g_now.saturating_duration_since(*t) >= Duration::from_millis(280))
+                .or_else(|| speed_history.front());
+            if let Some(&(ref_t, ref_spd)) = ref_sample {
+                let dt = g_now.saturating_duration_since(ref_t).as_secs_f64();
+                if (0.12..=2.0).contains(&dt) {
+                    let dv_ms = (spd_for_cons - ref_spd) / 3.6;
                     let inst_lon = (dv_ms / (dt * 9.81)).clamp(-1.3, 1.3);
-                    smooth_g_lon = smooth_g_lon * 0.55 + inst_lon * 0.45;
-                    if let (Some(cur_b), Some(prev_b)) = (live.gps.as_ref().and_then(|g| g.bearing), prev_g_bearing) {
-                        if spd_for_cons >= 10.0 {
-                            let mut ddeg = cur_b - prev_b;
-                            if ddeg > 180.0 { ddeg -= 360.0; }
-                            if ddeg < -180.0 { ddeg += 360.0; }
-                            let omega = ddeg.to_radians() / dt;
-                            let v_ms = spd_for_cons / 3.6;
-                            // Right turn (positive bearing delta) pushes G-ball left (negative g_lat)
-                            let inst_lat = (-(v_ms * omega) / 9.81).clamp(-1.3, 1.3);
-                            smooth_g_lat = smooth_g_lat * 0.60 + inst_lat * 0.40;
-                        } else {
-                            smooth_g_lat *= 0.6;
-                        }
-                    } else {
-                        smooth_g_lat *= 0.8;
-                    }
+                    smooth_g_lon = smooth_g_lon * 0.40 + inst_lon * 0.60;
                 }
             }
-            prev_g_at = Some(g_now);
-            prev_g_spd = spd_for_cons;
-            prev_g_bearing = live.gps.as_ref().and_then(|g| g.bearing);
+            if spd_for_cons < 1.0 && smooth_g_lon.abs() < 0.08 {
+                smooth_g_lon *= 0.5;
+            }
+
+            if let Some(ref gfix) = live.gps {
+                if let Some(cur_b) = gfix.bearing {
+                    let fresh_fix = gfix.ts != prev_gps_ts
+                        || prev_g_bearing.is_some_and(|pb| (cur_b - pb).abs() > 0.05);
+                    if fresh_fix {
+                        if let (Some(prev_t), Some(prev_b)) = (prev_gps_at, prev_g_bearing) {
+                            let dt = g_now.saturating_duration_since(prev_t).as_secs_f64();
+                            if (0.18..=2.5).contains(&dt) && spd_for_cons >= 8.0 {
+                                let mut ddeg = cur_b - prev_b;
+                                if ddeg > 180.0 { ddeg -= 360.0; }
+                                if ddeg < -180.0 { ddeg += 360.0; }
+                                let omega = ddeg.to_radians() / dt;
+                                let v_ms = spd_for_cons / 3.6;
+                                // Right turn (positive bearing delta) pushes G-ball left (negative g_lat)
+                                let inst_lat = (-(v_ms * omega) / 9.81).clamp(-1.0, 1.0);
+                                smooth_g_lat = smooth_g_lat * 0.35 + inst_lat * 0.65;
+                            } else {
+                                smooth_g_lat *= 0.55;
+                            }
+                        }
+                        prev_gps_at = Some(g_now);
+                        prev_gps_ts = gfix.ts;
+                        prev_g_bearing = Some(cur_b);
+                    } else if prev_gps_at.is_some_and(|t| g_now.saturating_duration_since(t) > Duration::from_millis(1600)) {
+                        smooth_g_lat *= 0.7;
+                    }
+                } else {
+                    smooth_g_lat *= 0.7;
+                }
+            } else {
+                smooth_g_lat *= 0.7;
+            }
             live.g_lon = Some((smooth_g_lon * 1000.0).round() / 1000.0);
             live.g_lat = Some((smooth_g_lat * 1000.0).round() / 1000.0);
             live.updated_at = now_unix_secs();
@@ -3454,6 +3663,19 @@ mod tests {
         assert!(pids.contains(&0x0C));
         assert!(pids.contains(&0x0D));
         assert!(pids.contains(&0x20));
+
+        // ISO 15765-4 CAN Multi-PID (single-frame pair + multi-frame 6-PID batch)
+        let dual = parse_mode01_multi("41 0C 1A F8 0D 50\r\n>", &[0x0C, 0x0D]);
+        assert_eq!(dual.get(&0x0C), Some(&vec![0x1A, 0xF8]));
+        assert_eq!(dual.get(&0x0D), Some(&vec![0x50]));
+
+        let batch = parse_mode01_multi(
+            "00E\r\n0: 41 0C 1A F8 0D 50\r\n1: 04 80 0B 9B 10 09 C4\r\n2: 49 64 00 00 00 00 00\r\n>",
+            &[0x0C, 0x0D, 0x04, 0x0B, 0x10, 0x49],
+        );
+        assert_eq!(batch.len(), 6);
+        assert_eq!(batch.get(&0x10), Some(&vec![0x09, 0xC4]));
+        assert_eq!(batch.get(&0x49), Some(&vec![0x64]));
     }
 
     #[test]

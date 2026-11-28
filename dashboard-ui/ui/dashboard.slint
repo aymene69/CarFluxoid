@@ -1666,7 +1666,7 @@ export component DashboardWindow inherits Window {
                                         border-radius: 11px;
                                         background: @linear-gradient(90deg, #4a0e1b 0%, #7a1426 100%);
                                         border-width: 1px;
-                                        border-color: root.perf-g-total >= 0.65 ? #ff1e3c : #c8233c;
+                                        border-color: root.perf-g-total >= 0.45 ? #ff1e3c : #c8233c;
 
                                         HorizontalLayout {
                                             padding-left: 8px;
@@ -1682,7 +1682,7 @@ export component DashboardWindow inherits Window {
                                     }
                                 }
 
-                                // Concentric Racing G-Sphere (166 x 166)
+                                // Concentric Racing G-Sphere (166 x 166 · scale: ±0.60G lon / ±0.35G lat)
                                 Rectangle {
                                     height: 170px;
 
@@ -1696,7 +1696,7 @@ export component DashboardWindow inherits Window {
                                         border-width: 1.5px;
                                         border-color: #6b1d30;
 
-                                        // 0.65 G ring
+                                        // Outer mid-ring (~0.40G lon / ~0.23G lat)
                                         Rectangle {
                                             width: 108px;
                                             height: 108px;
@@ -1708,7 +1708,7 @@ export component DashboardWindow inherits Window {
                                             border-color: #4f1726;
                                         }
 
-                                        // 0.30 G ring
+                                        // Inner ring (~0.20G lon / ~0.12G lat)
                                         Rectangle {
                                             width: 52px;
                                             height: 52px;
@@ -1724,19 +1724,19 @@ export component DashboardWindow inherits Window {
                                         Rectangle { x: 8px; y: 82.5px; width: 150px; height: 1px; background: #4a1826; }
                                         Rectangle { x: 82.5px; y: 8px; width: 1px; height: 150px; background: #4a1826; }
 
-                                        // Axis labels
-                                        Text { x: 0; y: 4px; width: parent.width; text: "FREIN"; font-size: 8px; font-weight: 700; color: #ff2a4b; horizontal-alignment: center; }
-                                        Text { x: 0; y: 151px; width: parent.width; text: "ACCÉL"; font-size: 8px; font-weight: 700; color: #ff8c38; horizontal-alignment: center; }
-                                        Text { x: 6px; y: 76px; text: "G"; font-size: 9px; font-weight: 700; color: #9c6272; }
-                                        Text { x: 151px; y: 76px; text: "D"; font-size: 9px; font-weight: 700; color: #9c6272; }
+                                        // Axis labels with real scales (±0.60G vertical, ±0.35G lateral)
+                                        Text { x: 0; y: 4px; width: parent.width; text: "FREIN 0.6"; font-size: 8px; font-weight: 700; color: #ff2a4b; horizontal-alignment: center; }
+                                        Text { x: 0; y: 151px; width: parent.width; text: "ACCÉL 0.6"; font-size: 8px; font-weight: 700; color: #ff8c38; horizontal-alignment: center; }
+                                        Text { x: 5px; y: 76px; text: "G .35"; font-size: 8px; font-weight: 700; color: #b8788a; }
+                                        Text { x: 136px; y: 76px; text: ".35 D"; font-size: 8px; font-weight: 700; color: #b8788a; }
 
-                                        // Glowing 2D G-Ball (accel -> down, brake -> up, turn -> left/right)
-                                        property <float> clat: max(-1.0, min(1.0, root.perf-g-lat));
-                                        property <float> clon: max(-1.0, min(1.0, root.perf-g-lon));
+                                        // Glowing 2D G-Ball: full travel at ±0.60 G lon (accel/brake) and ±0.35 G lat (left/right)
+                                        property <float> clat: max(-1.0, min(1.0, root.perf-g-lat / 0.35));
+                                        property <float> clon: max(-1.0, min(1.0, root.perf-g-lon / 0.60));
                                         property <length> cx: 83px + self.clat * 66px;
                                         property <length> cy: 83px + self.clon * 66px;
-                                        property <color> ball-color: root.perf-g-total >= 0.65 ? #ff1e3c
-                                            : root.perf-g-total >= 0.30 ? #ff6b2b
+                                        property <color> ball-color: root.perf-g-total >= 0.45 ? #ff1e3c
+                                            : root.perf-g-total >= 0.22 ? #ff6b2b
                                             : #ff3b5c;
 
                                         Rectangle {
