@@ -253,6 +253,10 @@ pub struct ObdLiveSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub torque_nm: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub g_lon: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g_lat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_s: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dist_since_clear_km: Option<u32>,
@@ -1282,6 +1286,8 @@ struct SimPayload {
     gear: Option<String>,
     power_hp: Option<f64>,
     torque_nm: Option<f64>,
+    g_lon: Option<f64>,
+    g_lat: Option<f64>,
     dist_since_clear_km: Option<u32>,
     warmups_since_clear: Option<u16>,
 }
@@ -1327,6 +1333,8 @@ pub fn apply_simulated_json(body: &[u8]) -> Result<String, String> {
     if sim.gear.is_some() { live.gear = sim.gear; }
     if sim.power_hp.is_some() { live.power_hp = sim.power_hp; }
     if sim.torque_nm.is_some() { live.torque_nm = sim.torque_nm; }
+    if sim.g_lon.is_some() { live.g_lon = sim.g_lon; }
+    if sim.g_lat.is_some() { live.g_lat = sim.g_lat; }
     if sim.dist_since_clear_km.is_some() { live.dist_since_clear_km = sim.dist_since_clear_km; }
     if sim.warmups_since_clear.is_some() { live.warmups_since_clear = sim.warmups_since_clear; }
     live.updated_at = now_unix_secs();
@@ -2062,6 +2070,11 @@ fn run_elm_session(
     let mut last_slow = Instant::now() - Duration::from_secs(30);
     let mut last_uds = Instant::now() - Duration::from_secs(60);
     let mut consec_errors = 0u32;
+    let mut prev_g_at: Option<Instant> = None;
+    let mut prev_g_spd: f64 = 0.0;
+    let mut prev_g_bearing: Option<f64> = None;
+    let mut smooth_g_lon: f64 = 0.0;
+    let mut smooth_g_lat: f64 = 0.0;
 
     loop {
         if is_sim_active(svc) {
@@ -2671,6 +2684,37 @@ fn run_elm_session(
             } else {
                 None
             };
+            // Estimate 2D G-force: longitudinal from OBD speed derivative, lateral from Uconnect GPS bearing rate
+            let g_now = Instant::now();
+            if let Some(prev_t) = prev_g_at {
+                let dt = g_now.saturating_duration_since(prev_t).as_secs_f64();
+                if (0.08..=2.5).contains(&dt) {
+                    let dv_ms = (spd_for_cons - prev_g_spd) / 3.6;
+                    let inst_lon = (dv_ms / (dt * 9.81)).clamp(-1.3, 1.3);
+                    smooth_g_lon = smooth_g_lon * 0.55 + inst_lon * 0.45;
+                    if let (Some(cur_b), Some(prev_b)) = (live.gps.as_ref().and_then(|g| g.bearing), prev_g_bearing) {
+                        if spd_for_cons >= 10.0 {
+                            let mut ddeg = cur_b - prev_b;
+                            if ddeg > 180.0 { ddeg -= 360.0; }
+                            if ddeg < -180.0 { ddeg += 360.0; }
+                            let omega = ddeg.to_radians() / dt;
+                            let v_ms = spd_for_cons / 3.6;
+                            // Right turn (positive bearing delta) pushes G-ball left (negative g_lat)
+                            let inst_lat = (-(v_ms * omega) / 9.81).clamp(-1.3, 1.3);
+                            smooth_g_lat = smooth_g_lat * 0.60 + inst_lat * 0.40;
+                        } else {
+                            smooth_g_lat *= 0.6;
+                        }
+                    } else {
+                        smooth_g_lat *= 0.8;
+                    }
+                }
+            }
+            prev_g_at = Some(g_now);
+            prev_g_spd = spd_for_cons;
+            prev_g_bearing = live.gps.as_ref().and_then(|g| g.bearing);
+            live.g_lon = Some((smooth_g_lon * 1000.0).round() / 1000.0);
+            live.g_lat = Some((smooth_g_lat * 1000.0).round() / 1000.0);
             live.updated_at = now_unix_secs();
             update_trip_state(active_trip, &mut live);
             write_dashboard_obd_snapshot(&live);

@@ -113,6 +113,8 @@ CONSOLE_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="row"><span>Accélérateur maintenu</span><strong id="vThr">0 %</strong></div>
     <input type="range" id="sThr" min="0" max="100" value="0">
+    <div class="row"><span>Volant / Virage G-Force (← / →)</span><strong id="vSteer">0°</strong></div>
+    <input type="range" id="sSteer" min="-100" max="100" value="0">
     <div class="row"><span>Niveau carburant PID 012F (+20% = test auto-plein)</span><strong id="vFuel">64 %</strong></div>
     <input type="range" id="sFuel" min="0" max="100" value="64">
     <div class="row"><span>Température eau moteur</span><strong id="vCool">88 °C</strong></div>
@@ -133,11 +135,11 @@ CONSOLE_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="hint">Clavier actif sur cette page : ↑/Z Accélérer · ↓/S Freiner · E/Q Rapports · A Auto · R FAP · D Démo</div>
+  <div class="hint">Clavier actif sur cette page : ↑/Z Accélérer · ↓/S Freiner · ←/→ Virage G-Force · E/Q Rapports · A Auto · R FAP · D Démo</div>
 
 <script>
 document.getElementById("apiUrl").textContent = location.origin;
-const ctrl = { throttle: 0, brake: 0, auto_gearbox: true, autopilot: false, dpf_regen: false, margins_32: true, gear: 0, fuel_pct: 64, coolant_c: 88 };
+const ctrl = { throttle: 0, brake: 0, steer: 0, auto_gearbox: true, autopilot: false, dpf_regen: false, margins_32: true, gear: 0, fuel_pct: 64, coolant_c: 88 };
 const keys = new Set();
 let mouseGas = false, mouseBrk = false;
 
@@ -164,6 +166,7 @@ function syncButtons() {
 }
 
 document.getElementById("sThr").oninput = e => { ctrl.autopilot = false; document.getElementById("vThr").textContent = e.target.value + " %"; pushCtrl({ throttle: +e.target.value, autopilot: false }); };
+document.getElementById("sSteer").oninput = e => { document.getElementById("vSteer").textContent = e.target.value + "°"; pushCtrl({ steer: +e.target.value }); };
 document.getElementById("sFuel").oninput = e => { document.getElementById("vFuel").textContent = e.target.value + " %"; pushCtrl({ fuel_pct: +e.target.value }); };
 document.getElementById("sCool").oninput = e => { document.getElementById("vCool").textContent = e.target.value + " °C"; pushCtrl({ coolant_c: +e.target.value }); };
 
@@ -180,7 +183,7 @@ btnBrk.onpointerup = btnBrk.onpointerleave = () => { mouseBrk = false; btnBrk.cl
 
 window.addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
-  if (["arrowup","arrowdown"," "].includes(k)) e.preventDefault();
+  if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k)) e.preventDefault();
   if (!keys.has(k)) {
     keys.add(k);
     if (k === "e") pushCtrl({ auto_gearbox: false, gear: Math.min(6, ctrl.gear + 1) });
@@ -219,6 +222,24 @@ setInterval(() => {
     ctrl.brake = Math.max(0, ctrl.brake - 24);
     patch.brake = ctrl.brake;
   }
+  const leftOn = keys.has("arrowleft");
+  const rightOn = keys.has("arrowright");
+  if (leftOn) {
+    ctrl.steer = Math.max(-100, ctrl.steer - 14);
+    document.getElementById("sSteer").value = Math.round(ctrl.steer);
+    document.getElementById("vSteer").textContent = Math.round(ctrl.steer) + "°";
+    patch.steer = ctrl.steer;
+  } else if (rightOn) {
+    ctrl.steer = Math.min(100, ctrl.steer + 14);
+    document.getElementById("sSteer").value = Math.round(ctrl.steer);
+    document.getElementById("vSteer").textContent = Math.round(ctrl.steer) + "°";
+    patch.steer = ctrl.steer;
+  } else if (!ctrl.autopilot && ctrl.steer !== 0 && document.activeElement !== document.getElementById("sSteer")) {
+    ctrl.steer = Math.abs(ctrl.steer) < 12 ? 0 : ctrl.steer * 0.78;
+    document.getElementById("sSteer").value = Math.round(ctrl.steer);
+    document.getElementById("vSteer").textContent = Math.round(ctrl.steer) + "°";
+    patch.steer = ctrl.steer;
+  }
   if (Object.keys(patch).length) pushCtrl(patch);
 }, 50);
 
@@ -249,6 +270,7 @@ class MultiJetSim:
         self.lock = threading.Lock()
         self.throttle_cmd = 0.0
         self.brake_cmd = 0.0
+        self.steer_cmd = 0.0
         self.auto_gearbox = True
         self.autopilot = False
         self.dpf_regen = False
@@ -257,6 +279,8 @@ class MultiJetSim:
         self.speed_kmh = 0.0
         self.rpm = 820.0
         self.gear = 0
+        self.g_lon = 0.0
+        self.g_lat = 0.0
         self.boost_bar = -0.04
         self.coolant_c = 88.0
         self.fuel_pct = 64.0
@@ -276,6 +300,8 @@ class MultiJetSim:
                 self.throttle_cmd = max(0.0, min(100.0, float(data["throttle"])))
             if "brake" in data:
                 self.brake_cmd = max(0.0, min(100.0, float(data["brake"])))
+            if "steer" in data:
+                self.steer_cmd = max(-100.0, min(100.0, float(data["steer"])))
             if "auto_gearbox" in data:
                 self.auto_gearbox = bool(data["auto_gearbox"])
             if "autopilot" in data:
@@ -297,8 +323,9 @@ class MultiJetSim:
             now = time.time()
             if self.autopilot:
                 phase = (now - self.start_time) * 0.35
-                self.throttle_cmd = max(0.0, min(100.0, 42.0 + 42.0 * math.sin(phase)))
-                self.brake_cmd = max(0.0, -35.0 * math.sin(phase))
+                self.throttle_cmd = max(0.0, min(100.0, 46.0 + 48.0 * math.sin(phase)))
+                self.brake_cmd = max(0.0, -42.0 * math.sin(phase))
+                self.steer_cmd = 68.0 * math.sin(phase * 1.45)
 
             thr = self.throttle_cmd / 100.0
             brk = self.brake_cmd / 100.0
@@ -322,7 +349,15 @@ class MultiJetSim:
             accel = thr * 5.8 * gear_mult - brk * 24.0 - 0.12 - (self.speed_kmh ** 2) * 0.00018
             if self.gear == 0:
                 accel = -brk * 24.0 - 0.25
+            prev_speed = self.speed_kmh
             self.speed_kmh = max(0.0, min(205.0, self.speed_kmh + accel * dt * 3.6))
+            actual_accel_ms2 = ((self.speed_kmh - prev_speed) / 3.6) / max(dt, 0.02)
+            target_g_lon = max(-1.15, min(1.15, actual_accel_ms2 / 9.81))
+            # Lateral G scales realistically with steering angle & speed (right turn pushes ball left, left turn right)
+            speed_factor = min(1.0, (self.speed_kmh / 75.0) ** 1.35)
+            target_g_lat = max(-1.15, min(1.15, -(self.steer_cmd / 100.0) * 0.95 * speed_factor))
+            self.g_lon += (target_g_lon - self.g_lon) * min(1.0, dt * 8.0)
+            self.g_lat += (target_g_lat - self.g_lat) * min(1.0, dt * 8.0)
 
             if self.gear == 0:
                 target_rpm = 820.0 + thr * 3400.0
@@ -405,6 +440,8 @@ class MultiJetSim:
                 "gear": "N" if self.gear == 0 else str(self.gear),
                 "power_hp": power_hp,
                 "torque_nm": torque_nm,
+                "g_lon": round(self.g_lon, 3),
+                "g_lat": round(self.g_lat, 3),
                 "runtime_s": int(now - self.start_time),
                 "dist_since_clear_km": self.dist_since_clear + int(self.trip_dist_km),
                 "warmups_since_clear": 255,
@@ -418,6 +455,22 @@ class MultiJetSim:
                     "ts": int(now),
                 },
                 "dtcs": [],
+                "active_trip": {
+                    "id": "sim-live",
+                    "started_at": int(self.start_time),
+                    "ended_at": int(now),
+                    "duration_s": max(1, int(now - self.start_time)),
+                    "distance_km": round(self.trip_dist_km, 2),
+                    "avg_speed_kmh": round(self.trip_dist_km / max((now - self.start_time) / 3600.0, 0.001), 1),
+                    "max_speed_kmh": round(max(self.speed_kmh, 64.0), 1),
+                    "max_rpm": round(max(self.rpm, 2400.0)),
+                    "fuel_used_l": round(self.trip_dist_km * 0.052, 3),
+                    "avg_l_per_100km": 5.2,
+                    "eco_score": 91,
+                    "sample_count": int(now - self.start_time),
+                    "has_gps": True,
+                    "has_obd": True,
+                },
                 "debug_log": [
                     "Simulateur Fiat Tipo 1.6 MultiJet actif",
                     f"RPM={round(self.rpm)} V={round(self.speed_kmh)}km/h Boost={self.boost_bar:+.2f}bar λ={lam:.2f}",

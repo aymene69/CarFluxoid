@@ -1578,24 +1578,35 @@ int main(int argc,char **argv){
     session_trace("CARPLAY_DISCONNECTED screen=%s",destination);
    }
   if(control_fd>=0&&video_ch>0){unsigned char ctrl[512];
+   static int alert_flash_return=0;
    ssize_t cn=recv(control_fd,ctrl,sizeof ctrl,MSG_DONTWAIT);
    if(cn>=8&&ctrl[0]==0x30){
     media_metadata_on_control(ctrl,(size_t)cn);
    }else if(cn==1){
     unsigned char event=ctrl[0];
     if(event==2||event==3){mic_wanted=event==2;session_trace("AA_MIC_CTRL wanted=%d ready=%d ch=%d open=%d",mic_wanted,mic_ready,mic_channel,mic_open);microphone_request();}
-    else if(event==4){if(live_peer>=0)close(live_peer);live_peer=-1;live_used=0;live_disconnected=1;}
-    else if(dashboard_enabled&&(event==1||(event==8&&screen==PROJECTION_WAITING))){
-     screen=PROJECTION_MENU;dashboard_visible=DASHBOARD_NONE;menu_picture.changed=1;
+    else if(event==4){if(live_peer>=0)close(live_peer);live_peer=-1;live_used=0;live_disconnected=1;alert_flash_return=0;}
+    else if(dashboard_enabled&&event==9&&screen==PROJECTION_CARPLAY){
+     alert_flash_return=1;screen=PROJECTION_MENU;dashboard_visible=DASHBOARD_NONE;menu_picture.changed=1;
+     codec_config_pending=1;
+     session_trace("ALERT_FLASH_SHOW");
+    }else if(event==10&&alert_flash_return&&screen==PROJECTION_MENU){
+     alert_flash_return=0;screen=PROJECTION_WAITING;dashboard_visible=0;next_waiting=0;
+     need_idr=1;codec_config_pending=1;
+     if(live_peer>=0)request_keyframe();
+     session_trace("ALERT_FLASH_HIDE");
+    }else if(dashboard_enabled&&(event==1||(event==8&&screen==PROJECTION_WAITING))){
+     alert_flash_return=0;screen=PROJECTION_MENU;dashboard_visible=DASHBOARD_NONE;menu_picture.changed=1;
      codec_config_pending=1;
      session_trace(event==8?"CARPLAY_WAIT_CANCELLED":"DASHBOARD_OPEN");
     }else if((event==5||event==7)&&screen==PROJECTION_MENU){
-     screen=PROJECTION_WAITING;dashboard_visible=0;next_waiting=0;
+     alert_flash_return=0;screen=PROJECTION_WAITING;dashboard_visible=0;next_waiting=0;
      need_idr=1;codec_config_pending=1;
      if(event==7&&live_peer>=0){close(live_peer);live_peer=-1;live_used=0;live_disconnected=1;}
      if(live_peer>=0)request_keyframe();
      session_trace("CARPLAY_WAITING restart=%d",event==7);
     }else if(event==1||(event==6&&dashboard_visible==DASHBOARD_MENU)){
+     alert_flash_return=0;
      unsigned char native[]={0x10,2,0x18,4};
      send_msg(video_ch,11,0x8007,native,sizeof native);
      focused=0;dashboard_visible=0;

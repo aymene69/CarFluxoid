@@ -407,8 +407,73 @@ export component DashboardWindow inherits Window {
     in property <string> obd-rail-egr: "—";
     in property <string> obd-dtc-summary: "Aucun défaut";
 
+    // Live Perf / Motorsport screen properties
+    in property <string> perf-fuel-type: "diesel"; // "diesel" | "petrol"
+    in property <string> perf-rpm-num: "—";
+    in property <float> perf-rpm-ratio: 0.0;
+    in property <bool> perf-shift-urgent: false;
+    in property <string> perf-shift-reason: "";
+    in property <string> perf-speed-num: "—";
+    in property <string> perf-power-hp: "— ch";
+    in property <string> perf-torque-nm: "— Nm";
+    in property <string> perf-pedal-pct: "—";
+    in property <float> perf-pedal-ratio: 0.0;
+    in property <string> perf-coolant-state: ""; // "cold" | "ready" | "hot" | ""
+    in property <string> perf-coolant-label: "Eau —";
+    in property <float> perf-g-lon: 0.0;
+    in property <float> perf-g-lat: 0.0;
+    in property <float> perf-g-total: 0.0;
+    in property <string> perf-g-total-text: "0.00 G";
+    in property <string> perf-g-peak-text: "0.00 G";
+    in property <string> perf-g-axes-text: "Lon +0.00 · Lat +0.00";
+    in property <string> perf-t-0-50: "Prêt";
+    in property <string> perf-t-0-100: "Prêt";
+    in property <string> perf-t-80-120: "Auto";
+    in property <bool> perf-t-0-50-live: false;
+    in property <bool> perf-t-0-100-live: false;
+    in property <bool> perf-t-80-120-live: false;
+    in property <string> perf-vmax: "—";
+    in property <string> perf-tab: "corsa"; // "corsa" | "voyage" | "sante"
+    in property <string> perf-instant-l100: "—";
+    in property <string> perf-avg-l100: "—";
+    in property <string> perf-range-km: "—";
+    in property <string> perf-eco-score: "—";
+    in property <bool> perf-trip-active: false;
+    in property <string> perf-trip-dist: "0.0 km";
+    in property <string> perf-trip-dur: "0 min";
+    in property <string> perf-dpf-soot: "—";
+    in property <string> perf-dpf-temp: "—";
+    in property <string> perf-rail-bar: "—";
+    in property <string> perf-egr-pct: "—";
+    in property <string> perf-lambda-val: "—";
+    in property <string> perf-oil-temp: "—";
+    in property <int> perf-dtc-count: 0;
+    in property <string> perf-dtc-list: "Aucun code défaut enregistré · Moteur sain";
+    in property <bool> dtc-clear-armed: false;
+    in property <string> diag-feedback: "";
+    in property <string> clock-time: "--:--";
+
+    // Real scannable QR codes (Wi-Fi AP + Web Admin)
+    in property <image> qr-wifi-image;
+    in property <bool> has-qr-wifi: false;
+    in property <image> qr-web-image;
+    in property <bool> has-qr-web: false;
+
+    // 4-second CarPlay Critical Alert Flash overlay
+    in property <bool> alert-flash-active: false;
+    in property <string> alert-flash-severity: "critical"; // "critical" | "warning" | "info"
+    in property <string> alert-flash-title: "";
+    in property <string> alert-flash-subtitle: "";
+
     // Callbacks handled in Rust
     callback navigate(string);
+    callback reset-perf();
+    callback toggle-fuel-type();
+    callback set-perf-tab(string);
+    callback diag-read-dtcs();
+    callback diag-clear-dtcs();
+    callback dismiss-alert();
+    callback test-alert-flash();
     callback start-carplay();
     callback restart-carplay();
     callback return-radio();
@@ -661,10 +726,10 @@ export component DashboardWindow inherits Window {
                 }
 
                 NavRailButton {
-                    label: "OBD";
-                    active: root.active-page == "obd";
-                    icon-commands: "M 4 17 C 4 12.6 7.6 9 12 9 C 16.4 9 20 12.6 20 17 M 12 17 L 16 12 M 7 17 L 17 17";
-                    clicked => { root.navigate("obd"); }
+                    label: "Perf";
+                    active: root.active-page == "perf";
+                    icon-commands: "M 5 20 L 5 4 M 5 5 L 19 5 L 16 9.5 L 19 14 L 5 14";
+                    clicked => { root.navigate("perf"); }
                 }
 
                 NavRailButton {
@@ -723,7 +788,7 @@ export component DashboardWindow inherits Window {
 
                     Text {
                         text: root.active-page == "home" ? "CarFluxoid"
-                            : root.active-page == "obd" ? "Télémétrie OBD-II"
+                            : root.active-page == "perf" ? "Perf · Sport & G-Force"
                             : root.active-page == "settings" ? "Réglages CarPlay"
                             : root.active-page == "network" ? "Wi-Fi & Bluetooth"
                             : root.active-page == "system" ? "Système & Capteurs"
@@ -775,213 +840,395 @@ export component DashboardWindow inherits Window {
             }
 
             // =================================================================
-            // PAGE 1: ACCUEIL (CarPlay Hero + Quick Cards)
+            // PAGE 1: ACCUEIL VIVANT (CarPlay Hero + Horloge + Résumé Voiture + Trajet)
             // =================================================================
             if root.active-page == "home": VerticalLayout {
                 vertical-stretch: 1;
-                spacing: 12px;
+                spacing: 10px;
 
                 HorizontalLayout {
-                    height: 344px;
-                    spacing: 14px;
+                    vertical-stretch: 1;
+                    spacing: 12px;
 
-                    // HERO CARPLAY CARD
+                    // LEFT: HERO CARPLAY + DIGITAL CLOCK
                     Rectangle {
-                        horizontal-stretch: 12;
-                        height: 344px;
-                        border-radius: 22px;
+                        horizontal-stretch: 11;
+                        border-radius: 20px;
                         background: root.day-mode
                             ? @linear-gradient(145deg, #0d3b3e 0%, #0a2533 100%)
-                            : @linear-gradient(145deg, #10323a 0%, #0d1d2e 65%, #0b1525 100%);
+                            : @linear-gradient(145deg, #10323a 0%, #0d1d2e 60%, #091322 100%);
                         border-width: 1.5px;
                         border-color: #1f5c63;
 
                         VerticalLayout {
-                            padding: 22px;
+                            padding: 18px;
                             spacing: 10px;
                             alignment: space-between;
 
-                            // Top badge
+                            // Top row: Live status pill + Big Clock
                             HorizontalLayout {
                                 alignment: space-between;
 
-                                Rectangle {
-                                    height: 28px;
-                                    width: 136px;
-                                    border-radius: 14px;
-                                    background: #14494e;
-                                    border-width: 1px;
-                                    border-color: #24787a;
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    alignment: start;
 
-                                    HorizontalLayout {
-                                        padding-left: 10px;
-                                        padding-right: 10px;
-                                        spacing: 6px;
-                                        alignment: center;
+                                    Rectangle {
+                                        height: 26px;
+                                        width: 126px;
+                                        border-radius: 13px;
+                                        background: #14494e;
+                                        border-width: 1px;
+                                        border-color: #24787a;
 
-                                        Rectangle {
-                                            width: 7px;
-                                            height: 7px;
-                                            y: 10px;
-                                            border-radius: 3.5px;
-                                            background: #22e3c3;
+                                        HorizontalLayout {
+                                            padding-left: 9px;
+                                            padding-right: 9px;
+                                            spacing: 6px;
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 7px; height: 7px; y: 9px; border-radius: 3.5px;
+                                                background: #22e3c3;
+                                            }
+                                            Text {
+                                                text: "CARPLAY PRÊT";
+                                                font-size: 10px; font-weight: 700; color: #6ff7df;
+                                                vertical-alignment: center;
+                                            }
                                         }
+                                    }
 
-                                        Text {
-                                            text: "SANS FIL PRÊT";
-                                            font-size: 11px;
-                                            font-weight: 700;
-                                            letter-spacing: 0.8px;
-                                            color: #6ff7df;
-                                            vertical-alignment: center;
-                                        }
+                                    Text {
+                                        text: root.version-text + " · " + root.bluetooth-name;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: #7ea3b8;
+                                        overflow: elide;
                                     }
                                 }
 
                                 Text {
-                                    text: root.version-text;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                    color: #7ea3b8;
-                                    vertical-alignment: center;
+                                    text: root.clock-time;
+                                    font-size: 38px;
+                                    font-weight: 700;
+                                    color: #f8fafc;
+                                    vertical-alignment: top;
                                 }
                             }
 
-                            // Title & subtitle
+                            // Center Hero Title
                             VerticalLayout {
-                                spacing: 6px;
-
+                                spacing: 4px;
                                 Text {
                                     text: "Apple CarPlay";
-                                    font-size: 36px;
+                                    font-size: 30px;
                                     font-weight: 700;
                                     color: #f8fafc;
                                 }
-
-                                Text {
-                                    text: "Bluetooth : " + root.bluetooth-name;
-                                    font-size: 15px;
-                                    font-weight: 600;
-                                    color: #6ff7df;
-                                    overflow: elide;
-                                }
-
                                 Text {
                                     text: root.auto-start
-                                        ? "Démarrage automatique activé"
-                                        : "Démarrage manuel · touchez ci-dessous";
-                                    font-size: 13px;
+                                        ? "Lancement automatique actif · GPS voiture relié"
+                                        : "Touchez ci-dessous pour démarrer sans fil";
+                                    font-size: 12px;
                                     color: #93afc4;
+                                    overflow: elide;
                                 }
                             }
 
-                            // Primary CTA button
-                            Rectangle {
-                                height: 60px;
-                                border-radius: 15px;
-                                background: cp_ta.pressed ? #0fb89b
-                                    : @linear-gradient(90deg, #14d4b4 0%, #22c1dc 100%);
+                            // Primary CTA + Restart button row
+                            HorizontalLayout {
+                                height: 56px;
+                                spacing: 8px;
 
-                                HorizontalLayout {
-                                    padding-left: 20px;
-                                    padding-right: 20px;
-                                    alignment: space-between;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-radius: 14px;
+                                    background: cp_ta.pressed ? #0fb89b
+                                        : @linear-gradient(90deg, #14d4b4 0%, #22c1dc 100%);
 
-                                    Text {
-                                        text: "Démarrer CarPlay";
-                                        font-size: 19px;
-                                        font-weight: 700;
-                                        color: #041d1c;
-                                        vertical-alignment: center;
+                                    HorizontalLayout {
+                                        padding-left: 16px;
+                                        padding-right: 16px;
+                                        alignment: space-between;
+                                        Text {
+                                            text: "Démarrer CarPlay";
+                                            font-size: 17px;
+                                            font-weight: 700;
+                                            color: #041d1c;
+                                            vertical-alignment: center;
+                                        }
+                                        Path {
+                                            width: 20px; height: 20px; y: 18px;
+                                            viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+                                            commands: "M 5 12 L 19 12 M 13 6 L 19 12 L 13 18";
+                                            stroke: #041d1c; stroke-width: 2.5px;
+                                            stroke-line-cap: round; stroke-line-join: round; fill: transparent;
+                                        }
                                     }
 
-                                    Path {
-                                        width: 22px;
-                                        height: 22px;
-                                        y: 19px;
-                                        viewbox-x: 0;
-                                        viewbox-y: 0;
-                                        viewbox-width: 24;
-                                        viewbox-height: 24;
-                                        commands: "M 5 12 L 19 12 M 13 6 L 19 12 L 13 18";
-                                        stroke: #041d1c;
-                                        stroke-width: 2.5px;
-                                        stroke-line-cap: round;
-                                        stroke-line-join: round;
-                                        fill: transparent;
-                                    }
+                                    cp_ta := TouchArea { clicked => { root.start-carplay(); } }
                                 }
 
-                                cp_ta := TouchArea {
-                                    clicked => { root.start-carplay(); }
+                                Rectangle {
+                                    width: 56px;
+                                    border-radius: 14px;
+                                    background: rst_ta.pressed ? #264857 : #142c3b;
+                                    border-width: 1px;
+                                    border-color: #275366;
+
+                                    Path {
+                                        width: 22px; height: 22px; x: 17px; y: 17px;
+                                        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+                                        commands: "M 20 12 A 8 8 0 1 1 17.5 6.2 M 17.5 3 L 17.5 7 L 13.5 7";
+                                        stroke: #fbbf24; stroke-width: 2.2px;
+                                        stroke-line-cap: round; stroke-line-join: round; fill: transparent;
+                                    }
+
+                                    rst_ta := TouchArea { clicked => { root.restart-carplay(); } }
                                 }
                             }
                         }
                     }
 
-                    // RIGHT COLUMN QUICK ACTIONS
+                    // RIGHT COLUMN: LIVE VEHICLE CARD + ACTIVE TRIP + QUICK ACTIONS
                     VerticalLayout {
-                        horizontal-stretch: 10;
-                        height: 344px;
-                        spacing: 12px;
+                        horizontal-stretch: 11;
+                        spacing: 10px;
 
-                        QuickCard {
-                            height: 106px;
-                            title: "Redémarrer CarPlay";
-                            subtitle: "Relancer Wi-Fi & AirPlay";
-                            icon-tint: Palette.amber;
-                            icon-bg: Palette.amber-bg;
-                            icon-commands: "M 20 12 A 8 8 0 1 1 17.5 6.2 M 17.5 3 L 17.5 7 L 13.5 7";
-                            clicked => { root.restart-carplay(); }
+                        // LIVE VEHICLE STATUS CARD (Fuel + Range + Battery + Engine Temp)
+                        Rectangle {
+                            height: 148px;
+                            border-radius: 18px;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: root.obd-dpf-regen ? Palette.amber : Palette.border;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+                                alignment: space-between;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: "MA FIAT TIPO · EN DIRECT";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: Palette.muted;
+                                    }
+                                    Text {
+                                        text: root.obd-dpf-regen ? "🔥 FAP ACTIF"
+                                            : root.obd-connected ? "● Vgate OK"
+                                            : "○ Vgate en attente";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: root.obd-dpf-regen ? Palette.amber
+                                            : root.obd-connected ? Palette.accent
+                                            : Palette.subtle;
+                                    }
+                                }
+
+                                // Fuel level bar + Range
+                                VerticalLayout {
+                                    spacing: 5px;
+                                    HorizontalLayout {
+                                        alignment: space-between;
+                                        Text {
+                                            text: "Carburant  " + root.obd-fuel;
+                                            font-size: 15px;
+                                            font-weight: 700;
+                                            color: Palette.ink;
+                                        }
+                                        Text {
+                                            text: root.perf-range-km;
+                                            font-size: 14px;
+                                            font-weight: 700;
+                                            color: Palette.accent;
+                                        }
+                                    }
+                                    Rectangle {
+                                        height: 9px;
+                                        border-radius: 4.5px;
+                                        background: Palette.surface-alt;
+                                        clip: true;
+                                        Rectangle {
+                                            x: 0; y: 0;
+                                            height: parent.height;
+                                            width: parent.width * root.obd-fuel-ratio;
+                                            border-radius: 4.5px;
+                                            background: root.obd-fuel-ratio <= 0.16 ? Palette.red
+                                                : root.obd-fuel-ratio <= 0.28 ? Palette.amber
+                                                : Palette.accent;
+                                        }
+                                    }
+                                }
+
+                                // 3 Mini Vitals (Eau, Batterie, Conso)
+                                HorizontalLayout {
+                                    spacing: 8px;
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 44px;
+                                        border-radius: 10px;
+                                        background: Palette.surface-alt;
+                                        VerticalLayout {
+                                            padding: 6px; alignment: center;
+                                            Text { text: "EAU"; font-size: 9px; font-weight: 700; color: Palette.muted; horizontal-alignment: center; }
+                                            Text { text: root.obd-coolant; font-size: 14px; font-weight: 700; color: Palette.blue; horizontal-alignment: center; }
+                                        }
+                                    }
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 44px;
+                                        border-radius: 10px;
+                                        background: Palette.surface-alt;
+                                        VerticalLayout {
+                                            padding: 6px; alignment: center;
+                                            Text { text: "BATTERIE"; font-size: 9px; font-weight: 700; color: Palette.muted; horizontal-alignment: center; }
+                                            Text { text: root.obd-battery; font-size: 14px; font-weight: 700; color: Palette.accent; horizontal-alignment: center; }
+                                        }
+                                    }
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 44px;
+                                        border-radius: 10px;
+                                        background: Palette.surface-alt;
+                                        VerticalLayout {
+                                            padding: 6px; alignment: center;
+                                            Text { text: "CONSO"; font-size: 9px; font-weight: 700; color: Palette.muted; horizontal-alignment: center; }
+                                            Text { text: root.obd-consumption; font-size: 13px; font-weight: 700; color: Palette.ink; horizontal-alignment: center; overflow: elide; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            TouchArea { clicked => { root.navigate("perf"); } }
                         }
 
-                        QuickCard {
-                            height: 106px;
-                            title: "Réglages CarPlay";
-                            subtitle: root.fps + " FPS · Barre " + (root.sidebar == "left" ? "gauche" : root.sidebar == "right" ? "droite" : "bas");
-                            icon-tint: Palette.accent;
-                            icon-bg: Palette.accent-bg;
-                            icon-commands: "M 4 7 L 20 7 M 9 4 L 9 10 M 4 17 L 20 17 M 15 14 L 15 20";
-                            clicked => { root.navigate("settings"); }
+                        // ACTIVE TRIP LIVE CARD
+                        Rectangle {
+                            height: 102px;
+                            border-radius: 16px;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: root.perf-trip-active ? Palette.accent-border : Palette.border;
+
+                            VerticalLayout {
+                                padding: 13px;
+                                spacing: 6px;
+                                alignment: space-between;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: root.perf-trip-active ? "● TRAJET EN COURS" : "TRAJET & ÉCO";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: root.perf-trip-active ? Palette.accent : Palette.muted;
+                                    }
+                                    Text {
+                                        text: "Éco " + root.perf-eco-score;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: Palette.blue;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: space-between;
+
+                                    VerticalLayout {
+                                        Text { text: root.perf-trip-dist; font-size: 22px; font-weight: 700; color: Palette.ink; }
+                                        Text { text: "Distance"; font-size: 10px; color: Palette.muted; }
+                                    }
+                                    VerticalLayout {
+                                        Text { text: root.perf-trip-dur; font-size: 22px; font-weight: 700; color: Palette.ink; }
+                                        Text { text: "Durée"; font-size: 10px; color: Palette.muted; }
+                                    }
+                                    VerticalLayout {
+                                        Text { text: root.perf-avg-l100; font-size: 20px; font-weight: 700; color: Palette.accent; horizontal-alignment: right; }
+                                        Text { text: "Moyenne"; font-size: 10px; color: Palette.muted; horizontal-alignment: right; }
+                                    }
+                                }
+                            }
+
+                            TouchArea {
+                                clicked => {
+                                    root.set-perf-tab("voyage");
+                                    root.navigate("perf");
+                                }
+                            }
                         }
 
-                        QuickCard {
-                            height: 106px;
-                            title: "Wi-Fi & Bluetooth";
-                            subtitle: root.wifi-name;
-                            icon-tint: Palette.blue;
-                            icon-bg: Palette.blue-bg;
-                            icon-commands: "M 5 12.5 C 8.9 9 15.1 9 19 12.5 M 8.5 16 C 10.5 14.2 13.5 14.2 15.5 16 M 2 9 C 7.6 4 16.4 4 22 9 M 12 19.5 L 12.01 19.5";
-                            clicked => { root.navigate("network"); }
+                        // QUICK SHORTCUTS ROW (Perf Corsa + Test Flash Alerte)
+                        HorizontalLayout {
+                            vertical-stretch: 1;
+                            spacing: 10px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 14px;
+                                background: p_go.pressed ? #54101f : @linear-gradient(120deg, #330914 0%, #19070d 100%);
+                                border-width: 1px;
+                                border-color: #781c33;
+
+                                HorizontalLayout {
+                                    padding-left: 14px; padding-right: 14px; alignment: space-between;
+                                    Text { text: "🏁 Cockpit Perf"; font-size: 14px; font-weight: 700; color: #ff4d6a; vertical-alignment: center; }
+                                    Text { text: "›"; font-size: 18px; font-weight: 700; color: #ff4d6a; vertical-alignment: center; }
+                                }
+                                p_go := TouchArea {
+                                    clicked => {
+                                        root.set-perf-tab("corsa");
+                                        root.navigate("perf");
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 132px;
+                                border-radius: 14px;
+                                background: fl_go.pressed ? Palette.amber-bg : Palette.surface;
+                                border-width: 1px;
+                                border-color: Palette.border;
+
+                                Text {
+                                    text: "⚡ Test Alerte";
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: Palette.amber;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                fl_go := TouchArea { clicked => { root.test-alert-flash(); } }
+                            }
                         }
                     }
                 }
 
-                // BOTTOM BAR (Notice or Web URL)
+                // BOTTOM NOTICE / WEB BAR
                 Rectangle {
-                    height: 36px;
-                    border-radius: 10px;
+                    height: 30px;
+                    border-radius: 9px;
                     background: root.notice != "" ? Palette.accent-bg : Palette.surface;
                     border-width: 1px;
                     border-color: root.notice != "" ? Palette.accent-border : Palette.border;
 
                     HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 14px;
-                        alignment: space-between;
-
+                        padding-left: 12px; padding-right: 12px; alignment: space-between;
                         Text {
-                            text: root.notice != "" ? root.notice : "Portail web & OTA :  http://" + root.web-url;
-                            font-size: 13px;
-                            font-weight: 600;
+                            text: root.notice != "" ? root.notice : "Portail web : http://" + root.web-url + "  ·  Simulateur : /sim";
+                            font-size: 12px;
+                            font-weight: root.notice != "" ? 600 : 400;
                             color: root.notice != "" ? Palette.accent : Palette.muted;
                             vertical-alignment: center;
                             overflow: elide;
                         }
-
                         Text {
                             text: "GPS : " + root.gps-status;
-                            font-size: 12px;
+                            font-size: 11px;
                             font-weight: 600;
                             color: Palette.subtle;
                             vertical-alignment: center;
@@ -1201,389 +1448,1166 @@ export component DashboardWindow inherits Window {
             }
 
             // =================================================================
-            // PAGE 1B: OBD-II SPORT LIVE COCKPIT (dynamique ~2 FPS)
+            // PAGE 1B: PERF TRIPLE-VUE (CORSA | VOYAGE / ÉCO | SANTÉ / DIAG)
             // =================================================================
-            if root.active-page == "obd": VerticalLayout {
+            if root.active-page == "perf": Rectangle {
                 vertical-stretch: 1;
-                spacing: 10px;
+                border-radius: 16px;
+                background: root.perf-tab == "corsa"
+                    ? @linear-gradient(148deg, #090407 0%, #16060b 46%, #2b0711 100%)
+                    : root.perf-tab == "voyage"
+                        ? @linear-gradient(148deg, #060d12 0%, #091a1f 55%, #0a2526 100%)
+                        : @linear-gradient(148deg, #080d16 0%, #0d1729 55%, #111f38 100%);
+                border-width: 1.5px;
+                border-color: root.perf-tab == "corsa"
+                    ? (root.perf-shift-urgent ? #ff1e3c : #5a1828)
+                    : root.perf-tab == "voyage" ? #1c5e5c
+                    : #274066;
+                clip: true;
 
-                if root.obd-dpf-regen: Rectangle {
-                    height: 36px;
-                    border-radius: 10px;
-                    background: Palette.amber-bg;
-                    border-width: 1.5px;
-                    border-color: Palette.amber;
-
-                    Text {
-                        text: "RÉGÉNÉRATION FAP EN COURS — ÉVITEZ DE COUPER LE MOTEUR";
-                        font-size: 13px;
-                        font-weight: 700;
-                        color: Palette.amber;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // TOP SPORT TACHOMETER + GEAR + SPEED + POWER
+                // Top glowing accent stripe matching active sub-mode
                 Rectangle {
-                    height: 106px;
-                    border-radius: 14px;
-                    background: Palette.surface;
-                    border-width: 1px;
-                    border-color: Palette.border;
+                    x: 0; y: 0; width: parent.width; height: 3px;
+                    background: root.perf-tab == "corsa"
+                        ? @linear-gradient(90deg, transparent 0%, #ff1e3c 30%, #ff6b2b 70%, transparent 100%)
+                        : root.perf-tab == "voyage"
+                            ? @linear-gradient(90deg, transparent 0%, #14d4b4 50%, transparent 100%)
+                            : @linear-gradient(90deg, transparent 0%, #38bdf8 50%, transparent 100%);
+                }
 
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+
+                    // 3-VIEW MODE SWITCHER BAR (CORSA | VOYAGE | SANTÉ & DIAG)
                     HorizontalLayout {
-                        padding: 12px;
-                        spacing: 14px;
+                        height: 30px;
+                        spacing: 6px;
 
-                        // Gear indicator badge + Shift Up/Down arrow icon
                         Rectangle {
-                            width: 84px;
-                            height: 82px;
-                            border-radius: 12px;
-                            background: root.obd-shift-hint == "up" && root.obd-rpm-ratio > 0.68 ? Palette.amber-bg
-                                : root.obd-shift-hint == "down" ? Palette.blue-bg
-                                : Palette.accent-bg;
-                            border-width: 1.5px;
-                            border-color: root.obd-shift-hint == "up" && root.obd-rpm-ratio > 0.68 ? Palette.amber
-                                : root.obd-shift-hint == "down" ? Palette.blue
-                                : Palette.accent-border;
-
-                            // Up chevron icon (Shift Up)
-                            if root.obd-shift-hint == "up": Path {
-                                x: (parent.width - self.width) / 2;
-                                y: 4px;
-                                width: 22px;
-                                height: 14px;
-                                viewbox-x: 0;
-                                viewbox-y: 0;
-                                viewbox-width: 24;
-                                viewbox-height: 16;
-                                commands: "M 4 13 L 12 4 L 20 13";
-                                stroke: root.obd-rpm-ratio > 0.68 ? Palette.amber : Palette.accent;
-                                stroke-width: 3px;
-                                stroke-line-cap: round;
-                                stroke-line-join: round;
-                                fill: transparent;
-                            }
-
-                            if root.obd-shift-hint == "": Text {
-                                x: 0;
-                                y: 6px;
-                                width: parent.width;
-                                text: "RAPPORT";
-                                font-size: 9px;
-                                font-weight: 700;
-                                color: Palette.muted;
-                                horizontal-alignment: center;
-                            }
-
-                            Text {
-                                x: 0;
-                                y: 18px;
-                                width: parent.width;
-                                height: 44px;
-                                text: root.obd-gear;
-                                font-size: 38px;
-                                font-weight: 700;
-                                color: root.obd-shift-hint == "up" && root.obd-rpm-ratio > 0.68 ? Palette.amber
-                                    : root.obd-shift-hint == "down" ? Palette.blue
-                                    : Palette.accent;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-
-                            // Down chevron icon (Shift Down)
-                            if root.obd-shift-hint == "down": Path {
-                                x: (parent.width - self.width) / 2;
-                                y: parent.height - 18px;
-                                width: 22px;
-                                height: 14px;
-                                viewbox-x: 0;
-                                viewbox-y: 0;
-                                viewbox-width: 24;
-                                viewbox-height: 16;
-                                commands: "M 4 3 L 12 12 L 20 3";
-                                stroke: Palette.blue;
-                                stroke-width: 3px;
-                                stroke-line-cap: round;
-                                stroke-line-join: round;
-                                fill: transparent;
-                            }
-                        }
-
-                        // RPM bar + Speed + Power
-                        VerticalLayout {
                             horizontal-stretch: 1;
-                            alignment: center;
-                            spacing: 8px;
+                            border-radius: 9px;
+                            background: root.perf-tab == "corsa"
+                                ? @linear-gradient(90deg, #8c1229 0%, #d91c3c 100%)
+                                : #180c12;
+                            border-width: 1px;
+                            border-color: root.perf-tab == "corsa" ? #ff3b5c : #3b1c26;
 
-                            HorizontalLayout {
-                                alignment: space-between;
+                            Text {
+                                text: "🏁 CORSA";
+                                font-size: 12px; font-weight: 700;
+                                color: root.perf-tab == "corsa" ? #ffffff : #b57b8a;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.set-perf-tab("corsa"); } }
+                        }
 
-                                Text {
-                                    text: root.obd-rpm;
-                                    font-size: 24px;
-                                    font-weight: 700;
-                                    color: Palette.ink;
-                                }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 9px;
+                            background: root.perf-tab == "voyage"
+                                ? @linear-gradient(90deg, #0d6e66 0%, #14b8a6 100%)
+                                : #0d1921;
+                            border-width: 1px;
+                            border-color: root.perf-tab == "voyage" ? #2dd4bf : #223b47;
 
-                                Text {
-                                    text: root.obd-speed;
-                                    font-size: 24px;
-                                    font-weight: 700;
-                                    color: Palette.blue;
+                            Text {
+                                text: "🌿 VOYAGE & ÉCO";
+                                font-size: 12px; font-weight: 700;
+                                color: root.perf-tab == "voyage" ? #041d1c : #82b0b5;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.set-perf-tab("voyage"); } }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 9px;
+                            background: root.perf-tab == "sante"
+                                ? @linear-gradient(90deg, #0369a1 0%, #38bdf8 100%)
+                                : #0f1726;
+                            border-width: 1px;
+                            border-color: root.perf-tab == "sante" ? #7dd3fc : #253652;
+
+                            Text {
+                                text: root.perf-dtc-count > 0 ? "🔧 SANTÉ · " + root.perf-dtc-count + " DTC" : "🔧 SANTÉ & DIAG";
+                                font-size: 12px; font-weight: 700;
+                                color: root.perf-tab == "sante" ? #041524 : (root.perf-dtc-count > 0 ? #f87171 : #8fa8cc);
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.set-perf-tab("sante"); } }
+                        }
+                    }
+
+                    if root.obd-dpf-regen: Rectangle {
+                        height: 26px;
+                        border-radius: 8px;
+                        background: @linear-gradient(90deg, #451018 0%, #7c1d1d 50%, #451018 100%);
+                        border-width: 1px;
+                        border-color: #ff6b2b;
+
+                        Text {
+                            text: "🔥 RÉGÉNÉRATION FAP EN COURS — NE COUPEZ PAS LE MOTEUR";
+                            font-size: 11px; font-weight: 700; color: #fde047;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+
+                    // ---- VUE 1: CORSA (Crimson Racing Cluster) ----
+                    if root.perf-tab == "corsa": VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 8px;
+                    // ---------------------------------------------------------
+                    // TOP F1 20-LED SHIFT-LIGHT STRIP + BOLD DIGITAL RPM
+                    // ---------------------------------------------------------
+                    Rectangle {
+                        height: 60px;
+                        border-radius: 12px;
+                        background: @linear-gradient(180deg, #1a0911 0%, #0b060a 100%);
+                        border-width: 1px;
+                        border-color: root.perf-shift-urgent ? #ff1e3c : #541827;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 14px;
+
+                            // Big 20-LED F1 Shift-Light Bar (full stretch width)
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 60px;
+
+                                HorizontalLayout {
+                                    x: 0;
+                                    y: 15px;
+                                    width: parent.width;
+                                    height: 30px;
+                                    spacing: 4px;
+
+                                    for led-idx in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]: Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 30px;
+                                        border-radius: 5px;
+                                        property <float> thr: (led-idx + 0.5) / 20.0;
+                                        property <bool> lit: root.perf-rpm-ratio >= self.thr;
+                                        background: !self.lit ? #1d0e15
+                                            : led-idx >= 15 ? #ff1e3c
+                                            : led-idx >= 10 ? #ff5526
+                                            : led-idx >= 5 ? #f59e0b
+                                            : #22c55e;
+                                        border-width: self.lit ? 0px : 1px;
+                                        border-color: #3a1724;
+                                    }
                                 }
                             }
 
-                            // Graphical live RPM bar (0..5000 rpm)
-                            Rectangle {
-                                height: 18px;
-                                border-radius: 9px;
-                                background: Palette.surface-alt;
-                                border-width: 1px;
-                                border-color: Palette.border;
-                                clip: true;
+                            // Digital RPM Readout on right
+                            VerticalLayout {
+                                width: 124px;
+                                alignment: center;
+                                spacing: 0px;
+
+                                Text {
+                                    text: root.perf-rpm-num;
+                                    font-size: 30px;
+                                    font-weight: 700;
+                                    color: root.perf-rpm-ratio >= 0.80 ? #ff2a4b
+                                        : root.perf-rpm-ratio >= 0.60 ? #ff7b29
+                                        : #ffffff;
+                                    horizontal-alignment: right;
+                                }
+                                Text {
+                                    text: root.perf-fuel-type == "diesel" ? "TR/MIN · DIESEL" : "TR/MIN · ESSENCE";
+                                    font-size: 9px;
+                                    font-weight: 700;
+                                    color: #b86c80;
+                                    horizontal-alignment: right;
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------------------------------------------------------
+                    // MAIN 3-COLUMN RACING STAGE: G-FORCE | HERO GEAR/SPEED | CHRONOS
+                    // ---------------------------------------------------------
+                    HorizontalLayout {
+                        vertical-stretch: 1;
+                        spacing: 9px;
+
+                        // COLUMN 1 (LEFT): PRECISION 2D G-FORCE SPHERE (Crimson Racing Glow)
+                        Rectangle {
+                            width: 214px;
+                            border-radius: 13px;
+                            background: @linear-gradient(170deg, #170810 0%, #0a0509 100%);
+                            border-width: 1.5px;
+                            border-color: root.perf-g-total >= 0.65 ? #ff1e3c
+                                : root.perf-g-total >= 0.32 ? #ff6b2b
+                                : #4a1826;
+
+                            VerticalLayout {
+                                padding: 9px;
+                                spacing: 4px;
+                                alignment: space-between;
+
+                                HorizontalLayout {
+                                    height: 22px;
+                                    alignment: space-between;
+
+                                    Text {
+                                        text: "G-FORCE";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #d494a4;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Rectangle {
+                                        height: 22px;
+                                        border-radius: 11px;
+                                        background: @linear-gradient(90deg, #4a0e1b 0%, #7a1426 100%);
+                                        border-width: 1px;
+                                        border-color: root.perf-g-total >= 0.65 ? #ff1e3c : #c8233c;
+
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: root.perf-g-total-text;
+                                                font-size: 12px;
+                                                font-weight: 700;
+                                                color: #ffffff;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Concentric Racing G-Sphere (166 x 166)
+                                Rectangle {
+                                    height: 170px;
+
+                                    g-sphere := Rectangle {
+                                        width: 166px;
+                                        height: 166px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: 83px;
+                                        background: @radial-gradient(circle, #2a0a14 0%, #12060b 55%, #070407 100%);
+                                        border-width: 1.5px;
+                                        border-color: #6b1d30;
+
+                                        // 0.65 G ring
+                                        Rectangle {
+                                            width: 108px;
+                                            height: 108px;
+                                            x: 29px;
+                                            y: 29px;
+                                            border-radius: 54px;
+                                            background: transparent;
+                                            border-width: 1px;
+                                            border-color: #4f1726;
+                                        }
+
+                                        // 0.30 G ring
+                                        Rectangle {
+                                            width: 52px;
+                                            height: 52px;
+                                            x: 57px;
+                                            y: 57px;
+                                            border-radius: 26px;
+                                            background: transparent;
+                                            border-width: 1px;
+                                            border-color: #3d121e;
+                                        }
+
+                                        // Crosshairs
+                                        Rectangle { x: 8px; y: 82.5px; width: 150px; height: 1px; background: #4a1826; }
+                                        Rectangle { x: 82.5px; y: 8px; width: 1px; height: 150px; background: #4a1826; }
+
+                                        // Axis labels
+                                        Text { x: 0; y: 4px; width: parent.width; text: "FREIN"; font-size: 8px; font-weight: 700; color: #ff2a4b; horizontal-alignment: center; }
+                                        Text { x: 0; y: 151px; width: parent.width; text: "ACCÉL"; font-size: 8px; font-weight: 700; color: #ff8c38; horizontal-alignment: center; }
+                                        Text { x: 6px; y: 76px; text: "G"; font-size: 9px; font-weight: 700; color: #9c6272; }
+                                        Text { x: 151px; y: 76px; text: "D"; font-size: 9px; font-weight: 700; color: #9c6272; }
+
+                                        // Glowing 2D G-Ball (accel -> down, brake -> up, turn -> left/right)
+                                        property <float> clat: max(-1.0, min(1.0, root.perf-g-lat));
+                                        property <float> clon: max(-1.0, min(1.0, root.perf-g-lon));
+                                        property <length> cx: 83px + self.clat * 66px;
+                                        property <length> cy: 83px + self.clon * 66px;
+                                        property <color> ball-color: root.perf-g-total >= 0.65 ? #ff1e3c
+                                            : root.perf-g-total >= 0.30 ? #ff6b2b
+                                            : #ff3b5c;
+
+                                        Rectangle {
+                                            width: 36px;
+                                            height: 36px;
+                                            x: g-sphere.cx - 18px;
+                                            y: g-sphere.cy - 18px;
+                                            border-radius: 18px;
+                                            background: g-sphere.ball-color.transparentize(0.78);
+                                        }
+                                        Rectangle {
+                                            width: 22px;
+                                            height: 22px;
+                                            x: g-sphere.cx - 11px;
+                                            y: g-sphere.cy - 11px;
+                                            border-radius: 11px;
+                                            background: g-sphere.ball-color.transparentize(0.45);
+                                        }
+                                        Rectangle {
+                                            width: 12px;
+                                            height: 12px;
+                                            x: g-sphere.cx - 6px;
+                                            y: g-sphere.cy - 6px;
+                                            border-radius: 6px;
+                                            background: #ffffff;
+                                            border-width: 2.5px;
+                                            border-color: g-sphere.ball-color;
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text { text: root.perf-g-axes-text; font-size: 10px; font-weight: 600; color: #a87584; }
+                                    Text { text: "PIC " + root.perf-g-peak-text; font-size: 10px; font-weight: 700; color: #ff6b2b; }
+                                }
+                            }
+                        }
+
+                        // COLUMN 2 (CENTER): MASSIVE HERO GEAR + SPEED + CH/NM (Crimson Radial Glow)
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 13px;
+                            background: @radial-gradient(circle, #330915 0%, #16070d 55%, #090407 100%);
+                            border-width: 1.5px;
+                            border-color: root.perf-shift-urgent ? #ff1e3c
+                                : root.obd-shift-hint == "up" ? #ff6b2b
+                                : root.obd-shift-hint == "down" ? #38bdf8
+                                : #61192a;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 6px;
+                                alignment: space-between;
+
+                                // Top shift reason pill or SPORT label
+                                HorizontalLayout {
+                                    height: 22px;
+                                    alignment: center;
+
+                                    Rectangle {
+                                        height: 22px;
+                                        border-radius: 11px;
+                                        background: root.perf-shift-urgent ? #6b0f22
+                                            : root.obd-shift-hint == "up" ? #4f2209
+                                            : root.obd-shift-hint == "down" ? #0e2a47
+                                            : #2a0d16;
+                                        border-width: 1px;
+                                        border-color: root.perf-shift-urgent ? #ff1e3c
+                                            : root.obd-shift-hint == "up" ? #ff6b2b
+                                            : root.obd-shift-hint == "down" ? #38bdf8
+                                            : #781f35;
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            Text {
+                                                text: root.perf-shift-reason != ""
+                                                    ? (root.obd-shift-hint == "up" ? "▲ " : "▼ ") + root.perf-shift-reason
+                                                    : (root.perf-fuel-type == "diesel" ? "MULTIJET CORSA" : "ESSENCE CORSA");
+                                                font-size: 10px;
+                                                font-weight: 700;
+                                                color: root.perf-shift-urgent ? #ff4d6a
+                                                    : root.obd-shift-hint == "up" ? #ff8c38
+                                                    : root.obd-shift-hint == "down" ? #38bdf8
+                                                    : #f5b8c6;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // MASSIVE RACING GEAR FRAME WITH SHIFT CHEVRONS
+                                Rectangle {
+                                    height: 108px;
+
+                                    Rectangle {
+                                        width: 120px;
+                                        height: 106px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: 1px;
+                                        border-radius: 16px;
+                                        background: root.perf-shift-urgent
+                                            ? @linear-gradient(180deg, #6b0c1f 0%, #2b060d 100%)
+                                            : root.obd-shift-hint == "up"
+                                                ? @linear-gradient(180deg, #4d1f0a 0%, #1f0a06 100%)
+                                                : root.obd-shift-hint == "down"
+                                                    ? @linear-gradient(180deg, #0d2b47 0%, #071526 100%)
+                                                    : @linear-gradient(180deg, #2d0914 0%, #110509 100%);
+                                        border-width: 2px;
+                                        border-color: root.perf-shift-urgent ? #ff1e3c
+                                            : root.obd-shift-hint == "up" ? #ff6b2b
+                                            : root.obd-shift-hint == "down" ? #38bdf8
+                                            : #d91c3c;
+
+                                        if root.obd-shift-hint == "up": Path {
+                                            x: (parent.width - self.width) / 2;
+                                            y: 5px;
+                                            width: 28px;
+                                            height: 16px;
+                                            viewbox-x: 0;
+                                            viewbox-y: 0;
+                                            viewbox-width: 24;
+                                            viewbox-height: 16;
+                                            commands: "M 3 13 L 12 3 L 21 13";
+                                            stroke: root.perf-shift-urgent ? #ff1e3c : #ff7b29;
+                                            stroke-width: 3.4px;
+                                            stroke-line-cap: round;
+                                            stroke-line-join: round;
+                                            fill: transparent;
+                                        }
+
+                                        Text {
+                                            x: 0;
+                                            y: 16px;
+                                            width: parent.width;
+                                            height: 72px;
+                                            text: root.obd-gear;
+                                            font-size: 62px;
+                                            font-weight: 700;
+                                            color: root.perf-shift-urgent ? #ff3355
+                                                : root.obd-shift-hint == "up" ? #ff8c38
+                                                : root.obd-shift-hint == "down" ? #38bdf8
+                                                : #ffffff;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+
+                                        if root.obd-shift-hint == "down": Path {
+                                            x: (parent.width - self.width) / 2;
+                                            y: parent.height - 21px;
+                                            width: 28px;
+                                            height: 16px;
+                                            viewbox-x: 0;
+                                            viewbox-y: 0;
+                                            viewbox-width: 24;
+                                            viewbox-height: 16;
+                                            commands: "M 3 3 L 12 13 L 21 3";
+                                            stroke: #38bdf8;
+                                            stroke-width: 3.4px;
+                                            stroke-line-cap: round;
+                                            stroke-line-join: round;
+                                            fill: transparent;
+                                        }
+                                    }
+                                }
+
+                                // GIANT SPEEDOMETER + POWER/TORQUE STRIP
+                                VerticalLayout {
+                                    spacing: 1px;
+                                    alignment: center;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 5px;
+
+                                        Text {
+                                            text: root.perf-speed-num;
+                                            font-size: 46px;
+                                            font-weight: 700;
+                                            color: #ffffff;
+                                            vertical-alignment: bottom;
+                                        }
+                                        Text {
+                                            text: "km/h";
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            color: #b06a7c;
+                                            vertical-alignment: bottom;
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 10px;
+                                        Text { text: root.perf-power-hp; font-size: 15px; font-weight: 700; color: #ff2a4b; }
+                                        Text { text: "·"; font-size: 15px; font-weight: 700; color: #6e3545; }
+                                        Text { text: root.perf-torque-nm; font-size: 15px; font-weight: 700; color: #ff8c38; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // COLUMN 3 (RIGHT): DIESEL/ESSENCE TOGGLE + CHRONOS + ENGINE GUARD + THROTTLE + RESET
+                        VerticalLayout {
+                            width: 222px;
+                            spacing: 6px;
+
+                            // Fuel-Type Switcher (DIESEL / ESSENCE) + Reset Button
+                            HorizontalLayout {
+                                height: 32px;
+                                spacing: 6px;
 
                                 Rectangle {
-                                    x: 0;
-                                    y: 0;
-                                    height: parent.height;
-                                    width: parent.width * root.obd-rpm-ratio;
+                                    horizontal-stretch: 1;
                                     border-radius: 9px;
-                                    background: root.obd-rpm-ratio > 0.78 ? Palette.red
-                                        : root.obd-rpm-ratio > 0.62 ? Palette.amber
-                                        : Palette.accent;
+                                    background: ft_ta.pressed ? #4d1322 : @linear-gradient(90deg, #240a13 0%, #14070c 100%);
+                                    border-width: 1px;
+                                    border-color: root.perf-fuel-type == "diesel" ? #ff6b2b : #ff1e3c;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        alignment: space-between;
+                                        Text {
+                                            text: root.perf-fuel-type == "diesel" ? "⛽ DIESEL" : "⚡ ESSENCE";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: root.perf-fuel-type == "diesel" ? #ff8c38 : #ff3355;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: root.perf-fuel-type == "diesel" ? "5k" : "7k";
+                                            font-size: 10px;
+                                            font-weight: 700;
+                                            color: #b06a7c;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    ft_ta := TouchArea {
+                                        clicked => { root.toggle-fuel-type(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 68px;
+                                    border-radius: 9px;
+                                    background: reset_ta.pressed ? #6b0f22 : #1e0a11;
+                                    border-width: 1px;
+                                    border-color: #6b1d30;
+
+                                    Text {
+                                        text: "RESET";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #f8d4dc;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+
+                                    reset_ta := TouchArea {
+                                        clicked => { root.reset-perf(); }
+                                    }
                                 }
                             }
 
+                            // 3 Sleek Horizontal Motorsport Chrono Bars (Crimson-Tinted)
+                            Rectangle {
+                                height: 42px;
+                                border-radius: 10px;
+                                background: root.perf-t-0-50-live
+                                    ? @linear-gradient(90deg, #540f1e 0%, #1c080f 100%)
+                                    : @linear-gradient(90deg, #1b0910 0%, #0d060a 100%);
+                                border-width: 1px;
+                                border-color: root.perf-t-0-50-live ? #ff3b5c : #431623;
+                                clip: true;
+
+                                Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #ff3b5c; }
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 11px;
+                                    alignment: space-between;
+                                    Text { text: "0 – 50"; font-size: 12px; font-weight: 700; color: #d494a4; vertical-alignment: center; }
+                                    Text {
+                                        text: root.perf-t-0-50;
+                                        font-size: 20px;
+                                        font-weight: 700;
+                                        color: root.perf-t-0-50-live ? #ff4d6a : #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 42px;
+                                border-radius: 10px;
+                                background: root.perf-t-0-100-live
+                                    ? @linear-gradient(90deg, #6b0c1f 0%, #24070f 100%)
+                                    : @linear-gradient(90deg, #1b0910 0%, #0d060a 100%);
+                                border-width: 1px;
+                                border-color: root.perf-t-0-100-live ? #ff1e3c : #431623;
+                                clip: true;
+
+                                Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #ff1e3c; }
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 11px;
+                                    alignment: space-between;
+                                    Text { text: "0 – 100"; font-size: 12px; font-weight: 700; color: #d494a4; vertical-alignment: center; }
+                                    Text {
+                                        text: root.perf-t-0-100;
+                                        font-size: 20px;
+                                        font-weight: 700;
+                                        color: root.perf-t-0-100-live ? #ff1e3c : #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 42px;
+                                border-radius: 10px;
+                                background: root.perf-t-80-120-live
+                                    ? @linear-gradient(90deg, #52200a 0%, #1c0b06 100%)
+                                    : @linear-gradient(90deg, #1b0910 0%, #0d060a 100%);
+                                border-width: 1px;
+                                border-color: root.perf-t-80-120-live ? #ff7b29 : #431623;
+                                clip: true;
+
+                                Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #ff7b29; }
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 11px;
+                                    alignment: space-between;
+                                    Text { text: "80 – 120"; font-size: 12px; font-weight: 700; color: #d494a4; vertical-alignment: center; }
+                                    Text {
+                                        text: root.perf-t-80-120;
+                                        font-size: 20px;
+                                        font-weight: 700;
+                                        color: root.perf-t-80-120-live ? #ff8c38 : #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Vmax + Engine Warmth Guard
                             HorizontalLayout {
+                                height: 38px;
+                                spacing: 6px;
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    border-radius: 9px;
+                                    background: #14080d;
+                                    border-width: 1px;
+                                    border-color: #431623;
+
+                                    VerticalLayout {
+                                        padding: 5px;
+                                        alignment: center;
+                                        Text { text: "VMAX"; font-size: 8px; font-weight: 700; color: #a87584; horizontal-alignment: center; }
+                                        Text { text: root.perf-vmax; font-size: 13px; font-weight: 700; color: #ffffff; horizontal-alignment: center; }
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1.35;
+                                    border-radius: 9px;
+                                    background: root.perf-coolant-state == "hot" ? #540d1b
+                                        : root.perf-coolant-state == "cold" ? #0e2742
+                                        : #14080d;
+                                    border-width: 1px;
+                                    border-color: root.perf-coolant-state == "hot" ? #ff1e3c
+                                        : root.perf-coolant-state == "cold" ? #38bdf8
+                                        : #431623;
+
+                                    VerticalLayout {
+                                        padding: 5px;
+                                        alignment: center;
+                                        Text { text: "MOTEUR"; font-size: 8px; font-weight: 700; color: #a87584; horizontal-alignment: center; }
+                                        Text {
+                                            text: root.perf-coolant-label;
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: root.perf-coolant-state == "hot" ? #ff2a4b
+                                                : root.perf-coolant-state == "cold" ? #38bdf8
+                                                : #22c55e;
+                                            horizontal-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Racing Crimson Gradient Throttle Bar
+                            Rectangle {
+                                vertical-stretch: 1;
+                                border-radius: 9px;
+                                background: #14080d;
+                                border-width: 1px;
+                                border-color: #431623;
+
+                                VerticalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    padding-top: 6px;
+                                    padding-bottom: 6px;
+                                    alignment: space-between;
+
+                                    HorizontalLayout {
+                                        alignment: space-between;
+                                        Text { text: "ACCÉLÉRATEUR"; font-size: 9px; font-weight: 700; color: #a87584; }
+                                        Text { text: root.perf-pedal-pct; font-size: 11px; font-weight: 700; color: root.perf-pedal-ratio >= 0.80 ? #ff1e3c : #ff7b29; }
+                                    }
+
+                                    Rectangle {
+                                        height: 7px;
+                                        border-radius: 3.5px;
+                                        background: #240c14;
+                                        clip: true;
+
+                                        Rectangle {
+                                            x: 0;
+                                            y: 0;
+                                            height: parent.height;
+                                            width: parent.width * root.perf-pedal-ratio;
+                                            border-radius: 3.5px;
+                                            background: @linear-gradient(90deg, #991b1b 0%, #ff1e3c 65%, #ff8c38 100%);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    }
+
+                    // ---- VUE 2: VOYAGE & ÉCO ----
+                    if root.perf-tab == "voyage": VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 10px;
+
+                        // Top Row: Giant Instant Conso + Gear Eco + Speed
+                        HorizontalLayout {
+                            height: 138px;
+                            spacing: 10px;
+
+                            Rectangle {
+                                horizontal-stretch: 1.4;
+                                border-radius: 14px;
+                                background: @linear-gradient(155deg, #0d2b2e 0%, #09171e 100%);
+                                border-width: 1.5px;
+                                border-color: #1f6b69;
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    alignment: space-between;
+                                    Text { text: "CONSOMMATION INSTANTANÉE"; font-size: 11px; font-weight: 700; color: #7dd3c8; }
+                                    HorizontalLayout {
+                                        alignment: start; spacing: 8px;
+                                        Text { text: root.perf-instant-l100; font-size: 52px; font-weight: 700; color: #ffffff; vertical-alignment: bottom; }
+                                        Text { text: "L / 100"; font-size: 16px; font-weight: 700; color: #14d4b4; vertical-alignment: bottom; }
+                                    }
+                                    Text { text: "Moyenne trajet : " + root.perf-avg-l100 + "  ·  Score Éco : " + root.perf-eco-score; font-size: 12px; font-weight: 600; color: #9ec5c8; }
+                                }
+                            }
+
+                            // Eco Shift Gear + Speed
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                border-radius: 14px;
+                                background: #0c1821;
+                                border-width: 1px;
+                                border-color: #1e3b47;
+
+                                HorizontalLayout {
+                                    padding: 14px;
+                                    spacing: 14px;
+                                    alignment: space-between;
+
+                                    Rectangle {
+                                        width: 82px; height: 104px; border-radius: 13px;
+                                        background: root.obd-shift-hint == "up" ? #123b35 : root.obd-shift-hint == "down" ? #0e2a47 : #11222e;
+                                        border-width: 1.5px;
+                                        border-color: root.obd-shift-hint == "up" ? #14d4b4 : root.obd-shift-hint == "down" ? #38bdf8 : #264857;
+
+                                        if root.obd-shift-hint == "up": Path {
+                                            x: 29px; y: 6px; width: 24px; height: 14px;
+                                            viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 16;
+                                            commands: "M 3 13 L 12 3 L 21 13";
+                                            stroke: #14d4b4; stroke-width: 3px; stroke-line-cap: round; stroke-line-join: round; fill: transparent;
+                                        }
+                                        Text {
+                                            x: 0; y: 20px; width: parent.width; height: 60px;
+                                            text: root.obd-gear; font-size: 46px; font-weight: 700;
+                                            color: root.obd-shift-hint == "down" ? #38bdf8 : #14d4b4;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                        if root.obd-shift-hint == "down": Path {
+                                            x: 29px; y: 82px; width: 24px; height: 14px;
+                                            viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 16;
+                                            commands: "M 3 3 L 12 13 L 21 3";
+                                            stroke: #38bdf8; stroke-width: 3px; stroke-line-cap: round; stroke-line-join: round; fill: transparent;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1; alignment: center; spacing: 4px;
+                                        Text { text: root.perf-speed-num; font-size: 46px; font-weight: 700; color: #38bdf8; horizontal-alignment: center; }
+                                        Text { text: "km/h · " + root.perf-rpm-num + " tr"; font-size: 12px; font-weight: 600; color: #8ab4c4; horizontal-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Middle Row: Big Fuel Tank Gauge + Estimated Range
+                        Rectangle {
+                            height: 82px;
+                            border-radius: 14px;
+                            background: #0c1821;
+                            border-width: 1px;
+                            border-color: #1e3b47;
+
+                            VerticalLayout {
+                                padding: 13px;
+                                spacing: 8px;
                                 alignment: space-between;
 
-                                Text {
-                                    text: "Puissance : " + root.obd-power-torque;
-                                    font-size: 13px;
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text { text: "RÉSERVOIR CARBURANT (PID 012F) :  " + root.obd-fuel; font-size: 13px; font-weight: 700; color: #e2f1f5; }
+                                    Text { text: "Autonomie estimée : " + root.perf-range-km; font-size: 14px; font-weight: 700; color: #14d4b4; }
+                                }
+
+                                Rectangle {
+                                    height: 16px; border-radius: 8px; background: #132533; clip: true;
+                                    Rectangle {
+                                        x: 0; y: 0; height: parent.height;
+                                        width: parent.width * root.obd-fuel-ratio;
+                                        border-radius: 8px;
+                                        background: root.obd-fuel-ratio <= 0.16 ? #f87171
+                                            : root.obd-fuel-ratio <= 0.28 ? #f59e0b
+                                            : @linear-gradient(90deg, #0d9488 0%, #14d4b4 100%);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Bottom Row: Active Trip Distance, Duration, Eco Score, Coolant
+                        HorizontalLayout {
+                            vertical-stretch: 1;
+                            spacing: 10px;
+
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 13px; background: #0c1821; border-width: 1px; border-color: #1e3b47;
+                                VerticalLayout {
+                                    padding: 11px; alignment: space-between;
+                                    Text { text: "DISTANCE TRAJET"; font-size: 10px; font-weight: 700; color: #7fa6b5; }
+                                    Text { text: root.perf-trip-dist; font-size: 24px; font-weight: 700; color: #ffffff; }
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 13px; background: #0c1821; border-width: 1px; border-color: #1e3b47;
+                                VerticalLayout {
+                                    padding: 11px; alignment: space-between;
+                                    Text { text: "DURÉE TRAJET"; font-size: 10px; font-weight: 700; color: #7fa6b5; }
+                                    Text { text: root.perf-trip-dur; font-size: 24px; font-weight: 700; color: #ffffff; }
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 13px; background: #0c1821; border-width: 1px; border-color: #1e3b47;
+                                VerticalLayout {
+                                    padding: 11px; alignment: space-between;
+                                    Text { text: "SCORE ÉCO"; font-size: 10px; font-weight: 700; color: #7fa6b5; }
+                                    Text { text: root.perf-eco-score; font-size: 24px; font-weight: 700; color: #14d4b4; }
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 13px; background: #0c1821; border-width: 1px; border-color: #1e3b47;
+                                VerticalLayout {
+                                    padding: 11px; alignment: space-between;
+                                    Text { text: "EAU / BATTERIE"; font-size: 10px; font-weight: 700; color: #7fa6b5; }
+                                    Text { text: root.obd-coolant + " · " + root.obd-battery; font-size: 16px; font-weight: 700; color: #38bdf8; overflow: elide; }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- VUE 3: SANTÉ MULTIJET & DIAGNOSTIC DTC ----
+                    if root.perf-tab == "sante": VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 9px;
+
+                        // Row 1: 4 MultiJet Engine Health Tiles
+                        HorizontalLayout {
+                            height: 74px;
+                            spacing: 8px;
+
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 12px; background: #0d1626; border-width: 1px; border-color: #223554;
+                                VerticalLayout {
+                                    padding: 10px; alignment: space-between;
+                                    Text { text: "SUIE / TEMP FAP"; font-size: 9px; font-weight: 700; color: #8aa2c4; }
+                                    Text { text: root.perf-dpf-soot + " · " + root.perf-dpf-temp; font-size: 17px; font-weight: 700; color: root.obd-dpf-regen ? #f59e0b : #14d4b4; overflow: elide; }
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 12px; background: #0d1626; border-width: 1px; border-color: #223554;
+                                VerticalLayout {
+                                    padding: 10px; alignment: space-between;
+                                    Text { text: "PRESSION RAIL"; font-size: 9px; font-weight: 700; color: #8aa2c4; }
+                                    Text { text: root.perf-rail-bar; font-size: 19px; font-weight: 700; color: #38bdf8; }
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 12px; background: #0d1626; border-width: 1px; border-color: #223554;
+                                VerticalLayout {
+                                    padding: 10px; alignment: space-between;
+                                    Text { text: "VANNE EGR / λ"; font-size: 9px; font-weight: 700; color: #8aa2c4; }
+                                    Text { text: root.perf-egr-pct + " · λ " + root.perf-lambda-val; font-size: 16px; font-weight: 700; color: #ffffff; overflow: elide; }
+                                }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1; border-radius: 12px; background: #0d1626; border-width: 1px; border-color: #223554;
+                                VerticalLayout {
+                                    padding: 10px; alignment: space-between;
+                                    Text { text: "EAU / HUILE / BATT"; font-size: 9px; font-weight: 700; color: #8aa2c4; }
+                                    Text { text: root.obd-coolant + " · " + root.obd-battery; font-size: 16px; font-weight: 700; color: #14d4b4; overflow: elide; }
+                                }
+                            }
+                        }
+
+                        // Row 2: Live DTC Diagnostic Panel + Read / Clear Controls
+                        Rectangle {
+                            vertical-stretch: 1;
+                            border-radius: 14px;
+                            background: #0c1424;
+                            border-width: 1.5px;
+                            border-color: root.perf-dtc-count > 0 ? #f87171 : #1f5c63;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 10px;
+                                alignment: space-between;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: root.perf-dtc-count > 0 ? "⚠️ CODES DÉFAUTS CALCULATEUR (" + root.perf-dtc-count + ")" : "✅ DIAGNOSTIC CALCULATEUR (MODES 03 & 07)";
+                                        font-size: 13px; font-weight: 700;
+                                        color: root.perf-dtc-count > 0 ? #f87171 : #14d4b4;
+                                    }
+                                    Text {
+                                        text: root.obd-connected ? root.obd-status : "Vgate hors ligne";
+                                        font-size: 11px; font-weight: 600; color: #7e97b8;
+                                    }
+                                }
+
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                    border-radius: 10px;
+                                    background: #080e1a;
+                                    border-width: 1px;
+                                    border-color: #1c2c47;
+
+                                    Text {
+                                        x: 12px; y: 10px;
+                                        width: parent.width - 24px;
+                                        height: parent.height - 20px;
+                                        text: root.perf-dtc-list;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: root.perf-dtc-count > 0 ? #fecaca : #a7f3d0;
+                                        wrap: word-wrap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    height: 44px;
+                                    spacing: 10px;
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        border-radius: 11px;
+                                        background: rd_ta.pressed ? #0284c7 : #38bdf8;
+                                        Text {
+                                            text: "🔍 Lire défauts (ECU)";
+                                            font-size: 14px; font-weight: 700; color: #041524;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                        rd_ta := TouchArea { clicked => { root.diag-read-dtcs(); } }
+                                    }
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        border-radius: 11px;
+                                        background: root.dtc-clear-armed ? #dc2626 : #2d141a;
+                                        border-width: 1.5px;
+                                        border-color: #f87171;
+                                        Text {
+                                            text: root.dtc-clear-armed ? "⚠️ CONFIRMER EFFACEMENT" : "🧹 Effacer voyant (Mode 04)";
+                                            font-size: 13px; font-weight: 700;
+                                            color: root.dtc-clear-armed ? #ffffff : #fca5a5;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                        TouchArea { clicked => { root.diag-clear-dtcs(); } }
+                                    }
+                                }
+
+                                if root.diag-feedback != "": Text {
+                                    text: root.diag-feedback;
+                                    font-size: 11px;
                                     font-weight: 600;
-                                    color: Palette.muted;
-                                }
-
-                                Text {
-                                    text: "Conso : " + root.obd-consumption;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                    color: Palette.accent;
+                                    color: #fbbf24;
                                 }
                             }
                         }
-                    }
-                }
-
-                // MIDDLE ROW: TURBO BOOST BAR + FUEL TANK BAR
-                HorizontalLayout {
-                    vertical-stretch: 1;
-                    spacing: 12px;
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        border-radius: 16px;
-                        background: Palette.surface;
-                        border-width: 1px;
-                        border-color: Palette.border;
-
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 8px;
-                            alignment: center;
-
-                            HorizontalLayout {
-                                alignment: space-between;
-
-                                Text {
-                                    text: "TURBO / BOOST";
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                    color: Palette.amber;
-                                }
-
-                                Text {
-                                    text: root.obd-boost;
-                                    font-size: 22px;
-                                    font-weight: 700;
-                                    color: Palette.ink;
-                                }
-                            }
-
-                            Rectangle {
-                                height: 14px;
-                                border-radius: 7px;
-                                background: Palette.surface-alt;
-                                clip: true;
-
-                                Rectangle {
-                                    x: 0;
-                                    y: 0;
-                                    height: parent.height;
-                                    width: parent.width * root.obd-boost-ratio;
-                                    border-radius: 7px;
-                                    background: Palette.amber;
-                                }
-                            }
-
-                            Text {
-                                text: root.obd-rail-egr;
-                                font-size: 12px;
-                                font-weight: 600;
-                                color: Palette.muted;
-                                overflow: elide;
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        border-radius: 16px;
-                        background: Palette.surface;
-                        border-width: 1px;
-                        border-color: Palette.border;
-
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 8px;
-                            alignment: center;
-
-                            HorizontalLayout {
-                                alignment: space-between;
-
-                                Text {
-                                    text: "CARBURANT";
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                    color: Palette.accent;
-                                }
-
-                                Text {
-                                    text: root.obd-fuel;
-                                    font-size: 22px;
-                                    font-weight: 700;
-                                    color: Palette.ink;
-                                }
-                            }
-
-                            Rectangle {
-                                height: 14px;
-                                border-radius: 7px;
-                                background: Palette.surface-alt;
-                                clip: true;
-
-                                Rectangle {
-                                    x: 0;
-                                    y: 0;
-                                    height: parent.height;
-                                    width: parent.width * root.obd-fuel-ratio;
-                                    border-radius: 7px;
-                                    background: root.obd-fuel-ratio < 0.15 ? Palette.red : Palette.accent;
-                                }
-                            }
-
-                            Text {
-                                text: "Eau : " + root.obd-coolant + "  ·  Batt : " + root.obd-battery;
-                                font-size: 12px;
-                                font-weight: 600;
-                                color: Palette.muted;
-                                overflow: elide;
-                            }
-                        }
-                    }
-                }
-
-                // BOTTOM COMPACT STATUS ROW
-                HorizontalLayout {
-                    height: 74px;
-                    spacing: 12px;
-
-                    TelemetryCard {
-                        horizontal-stretch: 1;
-                        label: "ANTIPOLLUTION & ECU";
-                        value: root.obd-dtc-summary;
-                        hint: "MultiJet OBD-II Live";
-                        accent-color: Palette.blue;
-                    }
-
-                    TelemetryCard {
-                        horizontal-stretch: 1;
-                        label: "BOÎTIER VGATE BLE";
-                        value: root.obd-connected ? "Connecté" : "En attente";
-                        hint: root.obd-status;
-                        accent-color: root.obd-connected ? Palette.accent : Palette.muted;
                     }
                 }
             }
 
             // =================================================================
-            // PAGE 3: WI-FI & BLUETOOTH
+            // PAGE 3: WI-FI & BLUETOOTH + QR CODES DE CONNEXION RAPIDE
             // =================================================================
             if root.active-page == "network": VerticalLayout {
                 vertical-stretch: 1;
-                spacing: 14px;
+                spacing: 10px;
 
-                QuickCard {
-                    height: 92px;
-                    title: "Nom du réseau Wi-Fi (AP)";
-                    subtitle: root.wifi-name;
-                    icon-tint: Palette.blue;
-                    icon-bg: Palette.blue-bg;
-                    icon-commands: "M 5 12.5 C 8.9 9 15.1 9 19 12.5 M 8.5 16 C 10.5 14.2 13.5 14.2 15.5 16 M 2 9 C 7.6 4 16.4 4 22 9 M 12 19.5 L 12.01 19.5";
-                    clicked => { root.open-editor("wifi"); }
+                // Top Row: Wi-Fi & Bluetooth Name Editors side by side
+                HorizontalLayout {
+                    height: 82px;
+                    spacing: 10px;
+
+                    QuickCard {
+                        horizontal-stretch: 1;
+                        title: "Nom Wi-Fi (AP)";
+                        subtitle: root.wifi-name;
+                        icon-tint: Palette.blue;
+                        icon-bg: Palette.blue-bg;
+                        icon-commands: "M 5 12.5 C 8.9 9 15.1 9 19 12.5 M 8.5 16 C 10.5 14.2 13.5 14.2 15.5 16 M 2 9 C 7.6 4 16.4 4 22 9 M 12 19.5 L 12.01 19.5";
+                        clicked => { root.open-editor("wifi"); }
+                    }
+
+                    QuickCard {
+                        horizontal-stretch: 1;
+                        title: "Nom Bluetooth";
+                        subtitle: root.bluetooth-name;
+                        icon-tint: Palette.accent;
+                        icon-bg: Palette.accent-bg;
+                        icon-commands: "M 7 7 L 17 17 L 12 22 L 12 2 L 17 7 L 7 17";
+                        clicked => { root.open-editor("bluetooth"); }
+                    }
                 }
 
-                QuickCard {
-                    height: 92px;
-                    title: "Nom Bluetooth CarPlay";
-                    subtitle: root.bluetooth-name;
-                    icon-tint: Palette.accent;
-                    icon-bg: Palette.accent-bg;
-                    icon-commands: "M 7 7 L 17 17 L 12 22 L 12 2 L 17 7 L 7 17";
-                    clicked => { root.open-editor("bluetooth"); }
-                }
-
-                Rectangle {
+                // Bottom Row: 2 Real Scannable QR Code Cards (Wi-Fi Auto-Join + Web Admin)
+                HorizontalLayout {
                     vertical-stretch: 1;
-                    border-radius: 16px;
-                    background: Palette.surface;
-                    border-width: 1px;
-                    border-color: Palette.border;
+                    spacing: 12px;
 
-                    VerticalLayout {
-                        padding: 18px;
-                        spacing: 6px;
-                        alignment: center;
+                    // QR CODE 1: WIFI AUTO-JOIN
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        border-radius: 16px;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
 
-                        Text {
-                            text: "Portail Web d’administration";
-                            font-size: 15px;
-                            font-weight: 700;
-                            color: Palette.ink;
+                        HorizontalLayout {
+                            padding: 14px;
+                            spacing: 14px;
+                            alignment: start;
+
+                            Rectangle {
+                                width: 158px;
+                                height: 158px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 12px;
+                                background: #ffffff;
+
+                                if root.has-qr-wifi: Image {
+                                    x: 5px; y: 5px;
+                                    width: 148px; height: 148px;
+                                    source: root.qr-wifi-image;
+                                    image-fit: contain;
+                                    image-rendering: pixelated;
+                                }
+                            }
+
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 6px;
+
+                                Text {
+                                    text: "QR Wi-Fi";
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    color: Palette.blue;
+                                }
+                                Text {
+                                    text: "Scannez avec l’iPhone pour rejoindre automatiquement :";
+                                    font-size: 12px;
+                                    color: Palette.muted;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: root.wifi-name;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: Palette.ink;
+                                    overflow: elide;
+                                }
+                            }
                         }
+                    }
 
-                        Text {
-                            text: "Connectez votre téléphone au Wi-Fi « " + root.wifi-name + " » puis ouvrez :";
-                            font-size: 13px;
-                            color: Palette.muted;
-                            overflow: elide;
-                        }
+                    // QR CODE 2: WEB PORTAL & SIMULATOR
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        border-radius: 16px;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
 
-                        Text {
-                            text: "http://" + root.web-url;
-                            font-size: 18px;
-                            font-weight: 700;
-                            color: Palette.accent;
-                        }
+                        HorizontalLayout {
+                            padding: 14px;
+                            spacing: 14px;
+                            alignment: start;
 
-                        if root.notice != "": Text {
-                            text: root.notice;
-                            font-size: 13px;
-                            font-weight: 600;
-                            color: Palette.amber;
+                            Rectangle {
+                                width: 158px;
+                                height: 158px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 12px;
+                                background: #ffffff;
+
+                                if root.has-qr-web: Image {
+                                    x: 5px; y: 5px;
+                                    width: 148px; height: 148px;
+                                    source: root.qr-web-image;
+                                    image-fit: contain;
+                                    image-rendering: pixelated;
+                                }
+                            }
+
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 6px;
+
+                                Text {
+                                    text: "Portail Web";
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    color: Palette.accent;
+                                }
+                                Text {
+                                    text: "Réglages avancés, logs voiture, OTA et simulateur /sim :";
+                                    font-size: 12px;
+                                    color: Palette.muted;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "http://" + root.web-url;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    color: Palette.ink;
+                                    overflow: elide;
+                                }
+                            }
                         }
                     }
                 }
@@ -1757,6 +2781,82 @@ export component DashboardWindow inherits Window {
                 }
             }
         }
+        }
+    }
+
+    // =========================================================================
+    // FULL-SCREEN 4-SECOND CARPLAY CRITICAL ALERT FLASH OVERLAY
+    // =========================================================================
+    if root.alert-flash-active: Rectangle {
+        x: root.safe-inset-x;
+        y: root.safe-inset-y;
+        width: root.width - root.safe-inset-x * 2;
+        height: root.height - root.safe-inset-y * 2;
+        background: root.alert-flash-severity == "critical"
+            ? @linear-gradient(150deg, #2b060d 0%, #5c0c1b 52%, #24050b 100%)
+            : root.alert-flash-severity == "warning"
+                ? @linear-gradient(150deg, #291805 0%, #573108 52%, #211204 100%)
+                : @linear-gradient(150deg, #062420 0%, #0d4a41 52%, #051c1a 100%);
+
+        Rectangle {
+            x: 34px;
+            y: (parent.height - 260px) / 2;
+            width: parent.width - 68px;
+            height: 260px;
+            border-radius: 24px;
+            background: #0a0c12.transparentize(0.22);
+            border-width: 2.5px;
+            border-color: root.alert-flash-severity == "critical" ? #ff2a4b
+                : root.alert-flash-severity == "warning" ? #f59e0b
+                : #14d4b4;
+
+            VerticalLayout {
+                padding: 26px;
+                spacing: 14px;
+                alignment: center;
+
+                Text {
+                    text: root.alert-flash-severity == "critical" ? "⚠️ ALERTE CRITIQUE CARFLUXOID"
+                        : root.alert-flash-severity == "warning" ? "⚡ ATTENTION VÉHICULE"
+                        : "✅ INFORMATION MOTEUR";
+                    font-size: 14px;
+                    font-weight: 700;
+                    letter-spacing: 1.2px;
+                    color: root.alert-flash-severity == "critical" ? #ff4d6a
+                        : root.alert-flash-severity == "warning" ? #fbbf24
+                        : #2dd4bf;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.alert-flash-title;
+                    font-size: 32px;
+                    font-weight: 700;
+                    color: #ffffff;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: root.alert-flash-subtitle;
+                    font-size: 18px;
+                    font-weight: 600;
+                    color: #e2e8f0;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "Retour automatique vers CarPlay dans 4 s  ·  Touchez pour fermer";
+                    font-size: 13px;
+                    color: #94a3b8;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        TouchArea {
+            clicked => { root.dismiss-alert(); }
         }
     }
 }

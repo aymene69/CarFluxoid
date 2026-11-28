@@ -7,6 +7,7 @@
 //! - or in screenshot mode (`render_screenshots`) for visual verification.
 
 pub mod h264_align;
+pub mod qr;
 pub mod state;
 
 use std::{
@@ -113,6 +114,70 @@ fn sync_ui(ui: &DashboardWindow, ctrl: &DashboardController, waiting: bool) {
     ui.set_obd_consumption(obd.consumption.into());
     ui.set_obd_rail_egr(obd.rail_egr.into());
     ui.set_obd_dtc_summary(obd.dtc_summary.into());
+
+    let perf = ctrl.perf_hud();
+    ui.set_perf_fuel_type(perf.fuel_type.into());
+    ui.set_perf_rpm_num(perf.rpm_num.into());
+    ui.set_perf_rpm_ratio(perf.rpm_ratio);
+    ui.set_perf_shift_urgent(perf.shift_urgent);
+    ui.set_perf_shift_reason(perf.shift_reason.into());
+    ui.set_perf_speed_num(perf.speed_num.into());
+    ui.set_perf_power_hp(perf.power_hp.into());
+    ui.set_perf_torque_nm(perf.torque_nm.into());
+    ui.set_perf_pedal_pct(perf.pedal_pct.into());
+    ui.set_perf_pedal_ratio(perf.pedal_ratio);
+    ui.set_perf_coolant_state(perf.coolant_state.into());
+    ui.set_perf_coolant_label(perf.coolant_label.into());
+    ui.set_perf_g_lon(perf.g_lon);
+    ui.set_perf_g_lat(perf.g_lat);
+    ui.set_perf_g_total(perf.g_total);
+    ui.set_perf_g_total_text(perf.g_total_text.into());
+    ui.set_perf_g_peak_text(perf.g_peak_text.into());
+    ui.set_perf_g_axes_text(perf.g_axes_text.into());
+    ui.set_perf_t_0_50(perf.t_0_50.into());
+    ui.set_perf_t_0_100(perf.t_0_100.into());
+    ui.set_perf_t_80_120(perf.t_80_120.into());
+    ui.set_perf_t_0_50_live(perf.t_0_50_live);
+    ui.set_perf_t_0_100_live(perf.t_0_100_live);
+    ui.set_perf_t_80_120_live(perf.t_80_120_live);
+    ui.set_perf_vmax(perf.vmax.into());
+    ui.set_perf_tab(ctrl.perf_tab.clone().into());
+    ui.set_perf_instant_l100(perf.instant_l100.into());
+    ui.set_perf_avg_l100(perf.avg_l100.into());
+    ui.set_perf_range_km(perf.range_km.into());
+    ui.set_perf_eco_score(perf.eco_score.into());
+    ui.set_perf_trip_active(perf.trip_active);
+    ui.set_perf_trip_dist(perf.trip_dist.into());
+    ui.set_perf_trip_dur(perf.trip_dur.into());
+    ui.set_perf_dpf_soot(perf.dpf_soot.into());
+    ui.set_perf_dpf_temp(perf.dpf_temp.into());
+    ui.set_perf_rail_bar(perf.rail_bar.into());
+    ui.set_perf_egr_pct(perf.egr_pct.into());
+    ui.set_perf_lambda_val(perf.lambda_val.into());
+    ui.set_perf_oil_temp(perf.oil_temp.into());
+    ui.set_perf_dtc_count(perf.dtc_count);
+    ui.set_perf_dtc_list(perf.dtc_list.into());
+    ui.set_dtc_clear_armed(ctrl.dtc_clear_armed);
+    ui.set_diag_feedback(ctrl.diag_feedback.clone().into());
+    ui.set_clock_time(ctrl.clock_time().into());
+
+    let flash = ctrl.active_alert_flash();
+    ui.set_alert_flash_active(flash.active);
+    ui.set_alert_flash_severity(flash.severity.into());
+    ui.set_alert_flash_title(flash.title.into());
+    ui.set_alert_flash_subtitle(flash.subtitle.into());
+}
+
+fn refresh_qr_codes(ui: &DashboardWindow, ctrl: &DashboardController) {
+    let wifi_payload = ctrl.wifi_qr_payload();
+    if let Some(m) = qr::QrMatrix::encode(&wifi_payload) {
+        ui.set_qr_wifi_image(m.to_slint_image(4));
+        ui.set_has_qr_wifi(true);
+    }
+    if let Some(m) = qr::QrMatrix::encode("http://192.168.50.2") {
+        ui.set_qr_web_image(m.to_slint_image(5));
+        ui.set_has_qr_web(true);
+    }
 }
 
 fn wire_callbacks(
@@ -136,6 +201,91 @@ fn wire_callbacks(
             c.cancel_pending_auto_start();
             c.notice.clear();
             c.active_page = page.to_string();
+            refresh(&c, false);
+            *dirty.borrow_mut() = true;
+        });
+    }
+    {
+        let ctrl = ctrl.clone();
+        let dirty = dirty.clone();
+        let refresh = refresh.clone();
+        ui.on_reset_perf(move || {
+            let c = ctrl.borrow();
+            c.reset_perf();
+            refresh(&c, false);
+            *dirty.borrow_mut() = true;
+        });
+    }
+    {
+        let ctrl = ctrl.clone();
+        let dirty = dirty.clone();
+        let refresh = refresh.clone();
+        ui.on_toggle_fuel_type(move || {
+            let c = ctrl.borrow();
+            c.toggle_fuel_type();
+            refresh(&c, false);
+            *dirty.borrow_mut() = true;
+        });
+    }
+    {
+        let ctrl = ctrl.clone();
+        let dirty = dirty.clone();
+        let refresh = refresh.clone();
+        ui.on_set_perf_tab(move |tab| {
+            let mut c = ctrl.borrow_mut();
+            c.perf_tab = tab.to_string();
+            c.dtc_clear_armed = false;
+            refresh(&c, false);
+            *dirty.borrow_mut() = true;
+        });
+    }
+    {
+        let ctrl = ctrl.clone();
+        let dirty = dirty.clone();
+        let refresh = refresh.clone();
+        ui.on_diag_read_dtcs(move || {
+            let mut c = ctrl.borrow_mut();
+            c.dtc_clear_armed = false;
+            c.request_obd_post("/api/obd/dtc/read", "Lecture des défauts ECU demandée…");
+            refresh(&c, false);
+            *dirty.borrow_mut() = true;
+        });
+    }
+    {
+        let ctrl = ctrl.clone();
+        let dirty = dirty.clone();
+        let refresh = refresh.clone();
+        ui.on_diag_clear_dtcs(move || {
+            let mut c = ctrl.borrow_mut();
+            if !c.dtc_clear_armed {
+                c.dtc_clear_armed = true;
+                c.diag_feedback = "Appuyez une 2e fois pour confirmer l'effacement (Mode 04).".into();
+            } else {
+                c.dtc_clear_armed = false;
+                c.request_obd_post("/api/obd/dtc/clear", "Effacement des codes défauts envoyé (Mode 04).");
+            }
+            refresh(&c, false);
+            *dirty.borrow_mut() = true;
+        });
+    }
+    {
+        let ctrl = ctrl.clone();
+        let dirty = dirty.clone();
+        let refresh = refresh.clone();
+        ui.on_dismiss_alert(move || {
+            let mut c = ctrl.borrow_mut();
+            c.dismiss_alert_flash();
+            refresh(&c, false);
+            *dirty.borrow_mut() = true;
+        });
+    }
+    {
+        let ctrl = ctrl.clone();
+        let dirty = dirty.clone();
+        let refresh = refresh.clone();
+        ui.on_test_alert_flash(move || {
+            let mut c = ctrl.borrow_mut();
+            c.trigger_test_flash();
             refresh(&c, false);
             *dirty.borrow_mut() = true;
         });
@@ -486,6 +636,7 @@ pub fn run_daemon(paths: Paths) -> Result<(), String> {
         ui.set_has_car_logo(true);
     }
     wire_callbacks(&ui, ctrl.clone(), dirty.clone());
+    refresh_qr_codes(&ui, &ctrl.borrow());
     sync_ui(&ui, &ctrl.borrow(), false);
 
     let endpoint = paths.runtime.join("input.sock");
@@ -614,8 +765,16 @@ pub fn run_daemon(paths: Paths) -> Result<(), String> {
             }
         }
 
-        // Live dynamic refresh (~5 FPS max) whenever the OBD Sport tab is open and obd.json updates
-        if ctrl.borrow().active_page == "obd" && last_obd_publish.elapsed() >= Duration::from_millis(180) {
+        // Live dynamic refresh (~5 FPS on Perf, ~0.5 FPS on Home) whenever obd.json updates
+        let page_now = ctrl.borrow().active_page.clone();
+        let min_interval = if page_now == "perf" {
+            Duration::from_millis(180)
+        } else if page_now == "home" {
+            Duration::from_millis(1800)
+        } else {
+            Duration::from_secs(3600)
+        };
+        if (page_now == "perf" || page_now == "home") && last_obd_publish.elapsed() >= min_interval {
             let cur_obd_mtime = fs::metadata(paths.bridge.join("obd.json"))
                 .and_then(|m| m.modified())
                 .ok();
@@ -624,6 +783,19 @@ pub fn run_daemon(paths: Paths) -> Result<(), String> {
                 last_obd_publish = Instant::now();
                 need_publish = true;
             }
+        }
+
+        // Continuous background alert-flash check (works even while CarPlay is active!)
+        let alert_ctrl_ev = {
+            let (_, ev) = ctrl.borrow().poll_alert_flash();
+            ev
+        };
+        if let Some(ev) = alert_ctrl_ev {
+            // Render the alert card (or clean restored screen) BEFORE signalling aa-phone!
+            publish(&ui, &window, &mut ctrl.borrow_mut(), &mut pixel_buf, &mut cfg_cache);
+            *dirty.borrow_mut() = false;
+            need_publish = false;
+            ctrl.borrow_mut().shell_action(ev);
         }
 
         // Refresh live telemetry (CPU temp / GPS / Day-Night) every 15 s when on Home/System
@@ -725,7 +897,7 @@ pub fn run_preview(logo_path: Option<&Path>) -> Result<(), String> {
         bridge: tmp,
     };
     let mut initial_ctrl = DashboardController::new(paths, true);
-    initial_ctrl.active_page = "obd".into();
+    initial_ctrl.active_page = "home".into();
     let ctrl = Rc::new(RefCell::new(initial_ctrl));
     let dirty = Rc::new(RefCell::new(false));
     let ui = DashboardWindow::new().map_err(|e| format!("DashboardWindow::new: {e}"))?;
@@ -743,6 +915,7 @@ pub fn run_preview(logo_path: Option<&Path>) -> Result<(), String> {
     }
 
     wire_callbacks(&ui, ctrl.clone(), dirty);
+    refresh_qr_codes(&ui, &ctrl.borrow());
     sync_ui(&ui, &ctrl.borrow(), false);
     ui.set_oem_name("Fiat".into());
 
@@ -754,7 +927,9 @@ pub fn run_preview(logo_path: Option<&Path>) -> Result<(), String> {
         Duration::from_millis(100),
         move || {
             if let Some(w) = ui_weak.upgrade() {
-                sync_ui(&w, &ctrl_poll.borrow(), false);
+                let c = ctrl_poll.borrow();
+                let _ = c.poll_alert_flash();
+                sync_ui(&w, &c, false);
                 w.set_oem_name("Fiat".into());
             }
         },
