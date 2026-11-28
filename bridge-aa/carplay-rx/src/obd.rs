@@ -527,6 +527,82 @@ pub fn parse_dtcs(raw: &str, mode_reply: u8, pending: bool) -> Vec<DtcCode> {
     out
 }
 
+/// Decode ISO 14229 UDS Service 19 02 (reportDTCByStatusMask) reply (59 02 <avail> [hi mid lo status]*).
+pub fn parse_uds_1902(raw: &str) -> Vec<DtcCode> {
+    let mut hex = String::new();
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.is_empty()
+            || t.starts_with("NO DATA")
+            || t.starts_with("SEARCHING")
+            || t.starts_with("STOPPED")
+            || t.starts_with("UNABLE")
+            || t.starts_with("ERROR")
+            || t.starts_with('?')
+        {
+            continue;
+        }
+        if !t.contains(':') && t.len() <= 3 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let body = match t.split_once(':') {
+            Some((prefix, rest)) if prefix.len() <= 2 && prefix.chars().all(|c| c.is_ascii_hexdigit()) => {
+                rest
+            }
+            _ => t,
+        };
+        for c in body.chars() {
+            if c.is_ascii_hexdigit() {
+                hex.push(c.to_ascii_uppercase());
+            }
+        }
+    }
+    if hex.len() < 6 || !hex.len().is_multiple_of(2) {
+        return Vec::new();
+    }
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect();
+    let Some(pos) = bytes.windows(2).position(|w| w[0] == 0x59 && w[1] == 0x02) else {
+        return Vec::new();
+    };
+    if pos + 3 >= bytes.len() {
+        return Vec::new();
+    }
+    let payload = &bytes[pos + 3..];
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for rec in payload.chunks_exact(4) {
+        if rec[0] == 0 && rec[1] == 0 {
+            continue;
+        }
+        let prefix = match (rec[0] >> 6) & 0x03 {
+            0 => 'P',
+            1 => 'C',
+            2 => 'B',
+            _ => 'U',
+        };
+        let d1 = (rec[0] >> 4) & 0x03;
+        let d2 = rec[0] & 0x0F;
+        let d3 = (rec[1] >> 4) & 0x0F;
+        let d4 = rec[1] & 0x0F;
+        let code = format!("{prefix}{d1}{d2:X}{d3:X}{d4:X}");
+        let status = rec[3];
+        let confirmed = (status & 0x08) != 0;
+        if seen.insert(code.clone()) {
+            let (desc, sev) = describe_dtc_fr(&code);
+            out.push(DtcCode {
+                code,
+                pending: !confirmed,
+                description_fr: desc.to_string(),
+                severity: sev.to_string(),
+            });
+        }
+    }
+    out
+}
+
 pub fn describe_dtc_fr(code: &str) -> (&'static str, &'static str) {
     match code {
         "P0087" => ("Pression rampe carburant (rail) trop basse", "critical"),
@@ -1688,54 +1764,134 @@ fn uds_i16(b: &[u8]) -> Option<i16> {
 }
 
 #[cfg(target_os = "linux")]
+fn summarize_elm_raw(raw: &str) -> String {
+    let s: String = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if s.len() > 96 {
+        format!("{}…", &s[..96])
+    } else if s.is_empty() {
+        "(vide)".into()
+    } else {
+        s
+    }
+}
+
+/// Switch ELM327 explicitly to 29-bit 500 kbps FCA/Fiat CAN (`ATSP7`) with
+/// physical addressing to Engine ECU `18DA10F1` -> `18DAF110` and explicit
+/// ISO-TP Flow Control (required on Fiat Tipo 2017 / EDC17C69 / MJD 9DF even
+/// when standard Mode 01 OBD-II negotiated 11-bit CAN `ATSP6`).
+#[cfg(target_os = "linux")]
+fn enter_fca_uds_29bit(svc: &Arc<ObdService>, t: &mut dyn ElmTransport, verbose: bool) {
+    let sp = t.send_command("ATSP7", Duration::from_millis(800));
+    let _ = t.send_command("ATCP18", Duration::from_millis(500));
+    let _ = t.send_command("ATSHDA10F1", Duration::from_millis(600));
+    let _ = t.send_command("ATCRA18DAF110", Duration::from_millis(600));
+    let _ = t.send_command("ATFCSH18DA10F1", Duration::from_millis(600));
+    let _ = t.send_command("ATFCSD300000", Duration::from_millis(500));
+    let _ = t.send_command("ATFCSM1", Duration::from_millis(500));
+    let sess = t.send_command("1003", Duration::from_millis(700));
+    if verbose {
+        push_log(
+            svc,
+            format!(
+                "UDS 29b ATSP7={} 1003={}",
+                sp.as_deref().map(summarize_elm_raw).unwrap_or_else(|e| e.clone()),
+                sess.as_deref().map(summarize_elm_raw).unwrap_or_else(|e| e.clone())
+            ),
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn enter_uds_11bit(svc: &Arc<ObdService>, t: &mut dyn ElmTransport, verbose: bool) {
+    let sp = t.send_command("ATSP6", Duration::from_millis(800));
+    let _ = t.send_command("ATCRA7E8", Duration::from_millis(500));
+    let _ = t.send_command("ATSH7E0", Duration::from_millis(600));
+    let _ = t.send_command("ATFCSH7E0", Duration::from_millis(500));
+    let _ = t.send_command("ATFCSD300000", Duration::from_millis(500));
+    let _ = t.send_command("ATFCSM1", Duration::from_millis(500));
+    let sess = t.send_command("1003", Duration::from_millis(700));
+    if verbose {
+        push_log(
+            svc,
+            format!(
+                "UDS 11b ATSP6={} 1003={}",
+                sp.as_deref().map(summarize_elm_raw).unwrap_or_else(|e| e.clone()),
+                sess.as_deref().map(summarize_elm_raw).unwrap_or_else(|e| e.clone())
+            ),
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_obd_standard(t: &mut dyn ElmTransport, default_29bit: bool) {
+    let _ = t.send_command("ATCRA", Duration::from_millis(500));
+    let _ = t.send_command("ATFCSM0", Duration::from_millis(500));
+    if default_29bit {
+        let _ = t.send_command("ATSP7", Duration::from_millis(600));
+        let _ = t.send_command("ATCP18", Duration::from_millis(500));
+        let _ = t.send_command("ATSHDB33F1", Duration::from_millis(600));
+    } else {
+        let _ = t.send_command("ATSP6", Duration::from_millis(600));
+        let _ = t.send_command("ATSH7DF", Duration::from_millis(600));
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn run_uds_multijet_scan(
     svc: &Arc<ObdService>,
     transport: &mut dyn ElmTransport,
     default_29bit: bool,
-) -> UdsScanResult {
-    push_log(svc, "Scan UDS MultiJet Pro (Service 22 lecture seule)…");
+) -> (UdsScanResult, Vec<DtcCode>) {
+    push_log(svc, "Scan UDS MultiJet Pro (ATSP7 29-bit FCA + Service 22)…");
 
-    let mut use_29 = default_29bit;
-    let set_hdr = |t: &mut dyn ElmTransport, is29: bool| {
-        if is29 {
-            let _ = t.send_command("ATCP18", Duration::from_millis(600));
-            let _ = t.send_command("ATSHDA10F1", Duration::from_millis(700));
-        } else {
-            let _ = t.send_command("ATSH7E0", Duration::from_millis(700));
-        }
-    };
-    let restore_hdr = |t: &mut dyn ElmTransport, is29: bool| {
-        if is29 {
-            let _ = t.send_command("ATCP18", Duration::from_millis(600));
-            let _ = t.send_command("ATSHDB33F1", Duration::from_millis(700));
-        } else {
-            let _ = t.send_command("ATSH7DF", Duration::from_millis(700));
-        }
-    };
-
-    let query = |t: &mut dyn ElmTransport, hi: u8, lo: u8| -> Option<Vec<u8>> {
+    let query_logged = |t: &mut dyn ElmTransport, hi: u8, lo: u8, log_raw: bool| -> Option<Vec<u8>> {
         let cmd = format!("22{hi:02X}{lo:02X}");
-        let resp = t.send_command(&cmd, Duration::from_millis(1200)).ok()?;
-        parse_uds_22(&resp, hi, lo)
+        let resp = match t.send_command(&cmd, Duration::from_millis(1200)) {
+            Ok(r) => r,
+            Err(e) => {
+                if log_raw {
+                    push_log(svc, format!("UDS {cmd} -> ERR {e}"));
+                }
+                return None;
+            }
+        };
+        let parsed = parse_uds_22(&resp, hi, lo);
+        if log_raw {
+            push_log(svc, format!("UDS {cmd} -> {}", summarize_elm_raw(&resp)));
+        }
+        parsed
+    };
+    let query = |t: &mut dyn ElmTransport, hi: u8, lo: u8| -> Option<Vec<u8>> {
+        query_logged(t, hi, lo, false)
     };
 
-    set_hdr(transport, use_29);
-    let mut part_bytes = query(transport, 0xF1, 0x87);
-    let mut soot_probe = query(transport, 0x18, 0xE4);
-    if part_bytes.is_none() && soot_probe.is_none() {
-        // Automatically retry with alternate CAN addressing (11-bit 7E0 <-> 29-bit FCA 18DA10F1)
-        use_29 = !use_29;
-        set_hdr(transport, use_29);
-        part_bytes = query(transport, 0xF1, 0x87);
-        soot_probe = query(transport, 0x18, 0xE4);
+    // Fiat/FCA MultiJet (Tipo 356, 500X, Giulietta) exposes UDS on 29-bit 18DA10F1
+    // even when standard Mode 01 OBD-II negotiated 11-bit CAN (ATSP6). Try 29-bit FIRST!
+    let mut use_29 = true;
+    enter_fca_uds_29bit(svc, transport, true);
+    let mut part_bytes = query_logged(transport, 0xF1, 0x87, true);
+    let mut soot_probe = query_logged(transport, 0x18, 0xE4, true);
+    let mut temp_probe = query_logged(transport, 0x18, 0xDE, true);
+    if part_bytes.is_none() && soot_probe.is_none() && temp_probe.is_none() {
+        // Fallback to 11-bit physical ECU addressing (7E0 -> 7E8)
+        use_29 = false;
+        enter_uds_11bit(svc, transport, true);
+        part_bytes = query_logged(transport, 0xF1, 0x87, true);
+        soot_probe = query_logged(transport, 0x18, 0xE4, true);
+        temp_probe = query_logged(transport, 0x18, 0xDE, true);
     }
 
     let mut res = UdsScanResult {
         scanned_at: now_unix_secs(),
         can_addressing: if use_29 {
-            "29-bit FCA (18DA10F1)".into()
+            "29-bit FCA (ATSP7 · 18DA10F1)".into()
         } else {
-            "11-bit CAN (7E0)".into()
+            "11-bit CAN (ATSP6 · 7E0)".into()
         },
         injectors_mm3: vec![None, None, None, None],
         ..Default::default()
@@ -1817,7 +1973,26 @@ fn run_uds_multijet_scan(
             }
         }
     }
-    if let Some(b) = query(transport, 0x18, 0xDE) {
+    if res.dpf_soot_pct.is_none() {
+        // Fallback DPF soot DIDs on some MJD 9DF / EDC17 SW versions
+        for (hi, lo) in [(0x18, 0xE3), (0x10, 0x0B)] {
+            if let Some(b) = query(transport, hi, lo) {
+                let pct = if let Some(raw) = uds_u16(&b) {
+                    let v = ((f64::from(raw) * 1000.0 / 65535.0) * 10.0).round() / 10.0;
+                    if (0.0..=150.0).contains(&v) { Some(v) } else { None }
+                } else if !b.is_empty() {
+                    let v = f64::from(b[0]);
+                    if (0.0..=150.0).contains(&v) { Some(v) } else { None }
+                } else { None };
+                if let Some(p) = pct {
+                    res.dpf_soot_pct = Some(p);
+                    record(&format!("{hi:02X}{lo:02X}"), "Colmatage FAP", &b, format!("{p:.1} %"));
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(b) = temp_probe.or_else(|| query(transport, 0x18, 0xDF)) {
         if let Some(raw) = uds_u16(&b) {
             let c = (f64::from(raw) * 0.02 - 40.0).round();
             if (-40.0..=1100.0).contains(&c) {
@@ -1943,16 +2118,33 @@ fn run_uds_multijet_scan(
         }
     }
 
-    restore_hdr(transport, default_29bit);
+    // 6. Read UDS Manufacturer DTCs (Service 19 02 0F = active + pending + confirmed)
+    let uds_dtcs = match transport.send_command("19020F", Duration::from_millis(2000)) {
+        Ok(r) => {
+            let parsed = parse_uds_1902(&r);
+            push_log(
+                svc,
+                format!("UDS DTC 19020F -> {} ({} codes)", summarize_elm_raw(&r), parsed.len()),
+            );
+            parsed
+        }
+        Err(e) => {
+            push_log(svc, format!("UDS DTC 19020F -> ERR {e}"));
+            Vec::new()
+        }
+    };
+
+    restore_obd_standard(transport, default_29bit);
     push_log(
         svc,
         format!(
-            "Scan UDS terminé : {} DIDs lus ({})",
+            "Scan UDS terminé : {} DIDs lus, {} DTC ({})",
             res.raw_dids.len(),
+            uds_dtcs.len(),
             res.can_addressing
         ),
     );
-    res
+    (res, uds_dtcs)
 }
 
 #[cfg(target_os = "linux")]
@@ -2048,7 +2240,17 @@ fn run_elm_session(
         .as_deref()
         .map(|p| p.contains("29"))
         .unwrap_or(false);
-    let mut dtcs = read_all_dtcs(transport);
+    let mut dtcs = read_all_dtcs(svc, transport, is_29bit_can);
+
+    // Probe ELM327 fast-return digit (`010C1` = return immediately after 1 CAN frame instead of waiting ATST).
+    let fast_suffix: &'static str = match transport.send_command("010C1", Duration::from_millis(800)) {
+        Ok(r) if parse_mode01_bytes(&r, 0x0C).is_some_and(|d| d.len() >= 2) => {
+            push_log(svc, "Mode rapide ELM327 activé (01xx1 -> ~8-10 Hz)");
+            "1"
+        }
+        _ => "",
+    };
+
     {
         let mut live = svc.live.lock().unwrap();
         live.connected = true;
@@ -2067,7 +2269,11 @@ fn run_elm_session(
 
     let mut probed_failures: HashMap<u8, u8> = HashMap::new();
     let mut uds_dpf_failures: u8 = 0;
-    let mut last_slow = Instant::now() - Duration::from_secs(30);
+    let mut uds_use_29: Option<bool> = None;
+    let mut uds_probe_count: u32 = 0;
+    let mut fast_rot_idx: usize = 0;
+    let mut slow_rot_idx: usize = 0;
+    let mut last_slow_step = Instant::now() - Duration::from_secs(5);
     let mut last_uds = Instant::now() - Duration::from_secs(60);
     let mut consec_errors = 0u32;
     let mut prev_g_at: Option<Instant> = None;
@@ -2075,6 +2281,14 @@ fn run_elm_session(
     let mut prev_g_bearing: Option<f64> = None;
     let mut smooth_g_lon: f64 = 0.0;
     let mut smooth_g_lat: f64 = 0.0;
+
+    // Secondary fast PIDs rotated 1 per cycle so RPM + Speed stay at ~8-10 Hz!
+    const FAST_ROT_PIDS: [u8; 7] = [0x04, 0x0B, 0x10, 0x49, 0x34, 0x11, 0x5E];
+    // Slow PIDs spread 1 per ~350 ms so RPM/Speed NEVER freezes for 1.5 s! (0xFF = AT RV battery voltage)
+    const SLOW_ROT_PIDS: [u8; 17] = [
+        0x05, 0x2F, 0x23, 0x42, 0xFF, 0x0F, 0x5C, 0x33, 0x46, 0x2C, 0x2D, 0x30, 0x3C, 0x78, 0x7A,
+        0x1F, 0x31,
+    ];
 
     loop {
         if is_sim_active(svc) {
@@ -2089,14 +2303,19 @@ fn run_elm_session(
                     return;
                 }
                 ObdCommand::ReadDtcs => {
-                    dtcs = read_all_dtcs(transport);
-                    svc.live.lock().unwrap().dtcs = dtcs.clone();
+                    dtcs = read_all_dtcs(svc, transport, is_29bit_can);
+                    let mut live = svc.live.lock().unwrap();
+                    live.dtcs = dtcs.clone();
+                    write_dashboard_obd_snapshot(&live);
                 }
                 ObdCommand::ClearDtcs => {
+                    push_log(svc, "Effacement DTC Mode 04 demandé…");
                     let _ = transport.send_command("04", Duration::from_millis(2000));
                     std::thread::sleep(Duration::from_millis(400));
-                    dtcs = read_all_dtcs(transport);
-                    svc.live.lock().unwrap().dtcs = dtcs.clone();
+                    dtcs = read_all_dtcs(svc, transport, is_29bit_can);
+                    let mut live = svc.live.lock().unwrap();
+                    live.dtcs = dtcs.clone();
+                    write_dashboard_obd_snapshot(&live);
                 }
                 ObdCommand::FinishTrip => {
                     if let Some(mut trip) = active_trip.take() {
@@ -2107,7 +2326,7 @@ fn run_elm_session(
                     }
                 }
                 ObdCommand::RunUdsScan => {
-                    let uds = run_uds_multijet_scan(svc, transport, is_29bit_can);
+                    let (uds, uds_dtcs) = run_uds_multijet_scan(svc, transport, is_29bit_can);
                     let mut live = svc.live.lock().unwrap();
                     if let Some(oil) = uds.oil_temp_c {
                         live.oil_c = Some(oil);
@@ -2117,6 +2336,14 @@ fn run_elm_session(
                     }
                     if let Some(temp) = uds.dpf_temp_c {
                         live.dpf_temp_c = Some(temp);
+                    }
+                    if let Some(mbar) = uds.dpf_diff_mbar {
+                        live.dpf_diff_kpa = Some((mbar * 0.1 * 10.0).round() / 10.0);
+                    }
+                    for d in uds_dtcs {
+                        if !live.dtcs.iter().any(|existing| existing.code == d.code) {
+                            live.dtcs.push(d);
+                        }
                     }
                     live.uds = Some(uds);
                     write_dashboard_obd_snapshot(&live);
@@ -2137,7 +2364,6 @@ fn run_elm_session(
         };
 
         let mut ok_this_cycle = false;
-        // Fast tier: RPM, Speed, Load, MAP (Boost), Throttle, MAF, Direct Fuel Rate.
         let mut rpm = None;
         let mut speed = None;
         let mut load = None;
@@ -2145,103 +2371,6 @@ fn run_elm_session(
         let mut throttle = None;
         let mut maf = None;
         let mut direct_fuel_lph = None;
-
-        if should_poll(0x0C, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("010C", Duration::from_millis(900)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x0C) {
-                    if d.len() >= 2 {
-                        rpm = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 4.0);
-                        ok_this_cycle = true;
-                        got = true;
-                    }
-                }
-            }
-            mark_probe(0x0C, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x0D, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("010D", Duration::from_millis(900)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x0D) {
-                    if !d.is_empty() {
-                        speed = Some(f64::from(d[0]));
-                        ok_this_cycle = true;
-                        got = true;
-                    }
-                }
-            }
-            mark_probe(0x0D, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x04, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("0104", Duration::from_millis(900)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x04) {
-                    if !d.is_empty() {
-                        load = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
-                        ok_this_cycle = true;
-                        got = true;
-                    }
-                }
-            }
-            mark_probe(0x04, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x0B, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("010B", Duration::from_millis(900)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x0B) {
-                    if !d.is_empty() {
-                        map = Some(f64::from(d[0]));
-                        ok_this_cycle = true;
-                        got = true;
-                    }
-                }
-            }
-            mark_probe(0x0B, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x11, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("0111", Duration::from_millis(900)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x11) {
-                    if !d.is_empty() {
-                        throttle = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
-                        ok_this_cycle = true;
-                        got = true;
-                    }
-                }
-            }
-            mark_probe(0x11, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x10, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("0110", Duration::from_millis(900)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x10) {
-                    if d.len() >= 2 {
-                        maf = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 100.0);
-                        ok_this_cycle = true;
-                        got = true;
-                    }
-                }
-            }
-            mark_probe(0x10, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x5E, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("015E", Duration::from_millis(900)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x5E) {
-                    if d.len() >= 2 {
-                        direct_fuel_lph =
-                            Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 20.0);
-                        ok_this_cycle = true;
-                        got = true;
-                    }
-                }
-            }
-            mark_probe(0x5E, got, &mut supported, &mut probed_failures);
-        }
-
-        // Slow tier every 5 seconds: Coolant, Oil, Intake, Baro, Rail, Fuel Level, Ambient, Voltage,
-        // EGR, Pedal, DPF Temp/Diff, Engine Runtime, Dist since DTC clear.
-        let do_slow = last_slow.elapsed() >= Duration::from_secs(5);
         let mut coolant = None;
         let mut oil = None;
         let mut intake = None;
@@ -2261,259 +2390,250 @@ fn run_elm_session(
         let mut dist_since_clear_km = None;
         let mut warmups_since_clear = None;
 
-        if should_poll(0x34, &supported, &probed_failures) {
+        // Priority tier (EVERY cycle -> ~8-10 Hz): RPM (010C) + Speed (010D).
+        if should_poll(0x0C, &supported, &probed_failures) {
             let mut got = false;
-            if let Ok(r) = transport.send_command("0134", Duration::from_millis(800)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x34) {
+            let cmd = format!("010C{fast_suffix}");
+            if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(650)) {
+                if let Some(d) = parse_mode01_bytes(&r, 0x0C) {
                     if d.len() >= 2 {
-                        let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
-                        let lam = (2.0 / 65536.0) * f64::from(raw);
-                        if (0.5..=16.0).contains(&lam) {
-                            lambda = Some((lam * 100.0).round() / 100.0);
-                            got = true;
-                        }
-                    }
-                }
-            }
-            mark_probe(0x34, got, &mut supported, &mut probed_failures);
-        }
-        if should_poll(0x49, &supported, &probed_failures) {
-            let mut got = false;
-            if let Ok(r) = transport.send_command("0149", Duration::from_millis(800)) {
-                if let Some(d) = parse_mode01_bytes(&r, 0x49) {
-                    if !d.is_empty() {
-                        pedal_pct = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                        rpm = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 4.0);
+                        ok_this_cycle = true;
                         got = true;
                     }
                 }
             }
-            mark_probe(0x49, got, &mut supported, &mut probed_failures);
+            mark_probe(0x0C, got, &mut supported, &mut probed_failures);
+        }
+        if should_poll(0x0D, &supported, &probed_failures) {
+            let mut got = false;
+            let cmd = format!("010D{fast_suffix}");
+            if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(650)) {
+                if let Some(d) = parse_mode01_bytes(&r, 0x0D) {
+                    if !d.is_empty() {
+                        speed = Some(f64::from(d[0]));
+                        ok_this_cycle = true;
+                        got = true;
+                    }
+                }
+            }
+            mark_probe(0x0D, got, &mut supported, &mut probed_failures);
         }
 
-        if do_slow {
-            last_slow = Instant::now();
-            if should_poll(0x05, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("0105", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x05) {
-                        if !d.is_empty() {
-                            coolant = Some(f64::from(d[0]) - 40.0);
+        // Rotate ONE secondary fast PID per cycle (Load, MAP, MAF, Pedal, Lambda, Throttle, FuelRate).
+        for _ in 0..FAST_ROT_PIDS.len() {
+            let pid = FAST_ROT_PIDS[fast_rot_idx % FAST_ROT_PIDS.len()];
+            fast_rot_idx = (fast_rot_idx + 1) % FAST_ROT_PIDS.len();
+            if !should_poll(pid, &supported, &probed_failures) {
+                continue;
+            }
+            let cmd = format!("01{pid:02X}{fast_suffix}");
+            let mut got = false;
+            if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(650)) {
+                if let Some(d) = parse_mode01_bytes(&r, pid) {
+                    match pid {
+                        0x04 if !d.is_empty() => {
+                            load = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
                             ok_this_cycle = true;
                             got = true;
                         }
-                    }
-                }
-                mark_probe(0x05, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x0F, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("010F", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x0F) {
-                        if !d.is_empty() {
-                            intake = Some(f64::from(d[0]) - 40.0);
+                        0x0B if !d.is_empty() => {
+                            map = Some(f64::from(d[0]));
+                            ok_this_cycle = true;
                             got = true;
                         }
-                    }
-                }
-                mark_probe(0x0F, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x5C, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("015C", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x5C) {
-                        if !d.is_empty() {
-                            oil = Some(f64::from(d[0]) - 40.0);
+                        0x10 if d.len() >= 2 => {
+                            maf = Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 100.0);
+                            ok_this_cycle = true;
                             got = true;
                         }
-                    }
-                }
-                mark_probe(0x5C, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x33, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("0133", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x33) {
-                        if !d.is_empty() {
-                            baro = Some(f64::from(d[0]));
+                        0x11 if !d.is_empty() => {
+                            throttle = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                            ok_this_cycle = true;
                             got = true;
                         }
-                    }
-                }
-                mark_probe(0x33, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x23, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("0123", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x23) {
-                        if d.len() >= 2 {
+                        0x34 if d.len() >= 2 => {
                             let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
-                            rail_bar = Some((f64::from(raw) / 10.0).round());
-                            got = true;
-                        }
-                    }
-                }
-                mark_probe(0x23, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x2F, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("012F", Duration::from_millis(1200)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x2F) {
-                        if !d.is_empty() {
-                            fuel_lvl = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
-                            got = true;
-                        }
-                    }
-                }
-                mark_probe(0x2F, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x46, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("0146", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x46) {
-                        if !d.is_empty() {
-                            ambient = Some(f64::from(d[0]) - 40.0);
-                            got = true;
-                        }
-                    }
-                }
-                mark_probe(0x46, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x42, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("0142", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x42) {
-                        if d.len() >= 2 {
-                            let mv = u16::from(d[0]) * 256 + u16::from(d[1]);
-                            batt_v = Some((f64::from(mv) / 10.0).round() / 100.0);
-                            got = true;
-                        }
-                    }
-                }
-                mark_probe(0x42, got, &mut supported, &mut probed_failures);
-            }
-            if batt_v.is_none() {
-                if let Ok(r) = transport.send_command("AT RV", Duration::from_millis(1000)) {
-                    batt_v = parse_at_rv(&r);
-                    if batt_v.is_some() {
-                        ok_this_cycle = true;
-                    }
-                }
-            }
-            if should_poll(0x2C, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("012C", Duration::from_millis(900)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x2C) {
-                        if !d.is_empty() {
-                            egr_pct = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
-                            got = true;
-                        }
-                    }
-                }
-                mark_probe(0x2C, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x2D, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("012D", Duration::from_millis(900)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x2D) {
-                        if !d.is_empty() {
-                            let err = ((f64::from(d[0]) - 128.0) * 100.0 / 128.0 * 10.0).round() / 10.0;
-                            egr_error_pct = Some(err);
-                            got = true;
-                        }
-                    }
-                }
-                mark_probe(0x2D, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x30, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("0130", Duration::from_millis(900)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x30) {
-                        if !d.is_empty() {
-                            warmups_since_clear = Some(u16::from(d[0]));
-                            got = true;
-                        }
-                    }
-                }
-                mark_probe(0x30, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x3C, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("013C", Duration::from_millis(900)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x3C) {
-                        if d.len() >= 2 {
-                            let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
-                            let c = (f64::from(raw) / 10.0 - 40.0).round();
-                            if (-40.0..=1100.0).contains(&c) {
-                                dpf_temp_c = Some(c);
+                            let lam = (2.0 / 65536.0) * f64::from(raw);
+                            if (0.5..=16.0).contains(&lam) {
+                                lambda = Some((lam * 100.0).round() / 100.0);
+                                ok_this_cycle = true;
                                 got = true;
                             }
                         }
+                        0x49 if !d.is_empty() => {
+                            pedal_pct = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                            ok_this_cycle = true;
+                            got = true;
+                        }
+                        0x5E if d.len() >= 2 => {
+                            direct_fuel_lph =
+                                Some(((u16::from(d[0]) * 256 + u16::from(d[1])) as f64) / 20.0);
+                            ok_this_cycle = true;
+                            got = true;
+                        }
+                        _ => {}
                     }
                 }
-                mark_probe(0x3C, got, &mut supported, &mut probed_failures);
             }
-            if dpf_temp_c.is_none() && should_poll(0x78, &supported, &probed_failures) {
+            mark_probe(pid, got, &mut supported, &mut probed_failures);
+            break;
+        }
+
+        // Spread slow tier: poll ONE slow PID every 350 ms (eliminates 1.5 s stutters on Perf!).
+        if last_slow_step.elapsed() >= Duration::from_millis(350) {
+            last_slow_step = Instant::now();
+            for _ in 0..SLOW_ROT_PIDS.len() {
+                let pid = SLOW_ROT_PIDS[slow_rot_idx % SLOW_ROT_PIDS.len()];
+                slow_rot_idx = (slow_rot_idx + 1) % SLOW_ROT_PIDS.len();
+                if pid == 0xFF {
+                    // Fallback battery voltage via ELM327 AT RV if PID 0142 isn't supported.
+                    if supported.contains(&0x42) {
+                        continue;
+                    }
+                    if let Ok(r) = transport.send_command("AT RV", Duration::from_millis(800)) {
+                        batt_v = parse_at_rv(&r);
+                        if batt_v.is_some() {
+                            ok_this_cycle = true;
+                        }
+                    }
+                    break;
+                }
+                if !should_poll(pid, &supported, &probed_failures) {
+                    continue;
+                }
+                let is_multi = pid == 0x78 || pid == 0x7A;
+                let cmd = if is_multi {
+                    format!("01{pid:02X}")
+                } else {
+                    format!("01{pid:02X}{fast_suffix}")
+                };
                 let mut got = false;
-                if let Ok(r) = transport.send_command("0178", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x78) {
-                        if d.len() >= 3 {
-                            let raw = u16::from(d[1]) * 256 + u16::from(d[2]);
-                            let c = (f64::from(raw) / 10.0 - 40.0).round();
-                            if (-40.0..=1100.0).contains(&c) {
-                                dpf_temp_c = Some(c);
+                if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(900)) {
+                    if let Some(d) = parse_mode01_bytes(&r, pid) {
+                        match pid {
+                            0x05 if !d.is_empty() => {
+                                coolant = Some(f64::from(d[0]) - 40.0);
+                                ok_this_cycle = true;
                                 got = true;
                             }
+                            0x0F if !d.is_empty() => {
+                                intake = Some(f64::from(d[0]) - 40.0);
+                                got = true;
+                            }
+                            0x5C if !d.is_empty() => {
+                                oil = Some(f64::from(d[0]) - 40.0);
+                                got = true;
+                            }
+                            0x33 if !d.is_empty() => {
+                                baro = Some(f64::from(d[0]));
+                                got = true;
+                            }
+                            0x23 if d.len() >= 2 => {
+                                let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
+                                rail_bar = Some((f64::from(raw) / 10.0).round());
+                                got = true;
+                            }
+                            0x2F if !d.is_empty() => {
+                                fuel_lvl = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                                got = true;
+                            }
+                            0x46 if !d.is_empty() => {
+                                ambient = Some(f64::from(d[0]) - 40.0);
+                                got = true;
+                            }
+                            0x42 if d.len() >= 2 => {
+                                let mv = u16::from(d[0]) * 256 + u16::from(d[1]);
+                                batt_v = Some((f64::from(mv) / 10.0).round() / 100.0);
+                                got = true;
+                            }
+                            0x2C if !d.is_empty() => {
+                                egr_pct = Some((f64::from(d[0]) * 100.0 / 255.0 * 10.0).round() / 10.0);
+                                got = true;
+                            }
+                            0x2D if !d.is_empty() => {
+                                let err = ((f64::from(d[0]) - 128.0) * 100.0 / 128.0 * 10.0).round() / 10.0;
+                                egr_error_pct = Some(err);
+                                got = true;
+                            }
+                            0x30 if !d.is_empty() => {
+                                warmups_since_clear = Some(u16::from(d[0]));
+                                got = true;
+                            }
+                            0x3C if d.len() >= 2 => {
+                                let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
+                                let c = (f64::from(raw) / 10.0 - 40.0).round();
+                                if (-40.0..=1100.0).contains(&c) {
+                                    dpf_temp_c = Some(c);
+                                    got = true;
+                                }
+                            }
+                            0x78 if d.len() >= 3 => {
+                                let raw = u16::from(d[1]) * 256 + u16::from(d[2]);
+                                let c = (f64::from(raw) / 10.0 - 40.0).round();
+                                if (-40.0..=1100.0).contains(&c) {
+                                    dpf_temp_c = Some(c);
+                                    got = true;
+                                }
+                            }
+                            0x7A if d.len() >= 3 => {
+                                let raw = u16::from(d[1]) * 256 + u16::from(d[2]);
+                                dpf_diff_kpa = Some((f64::from(raw) * 0.01 * 10.0).round() / 10.0);
+                                got = true;
+                            }
+                            0x1F if d.len() >= 2 => {
+                                runtime_s = Some(u32::from(u16::from(d[0]) * 256 + u16::from(d[1])));
+                                got = true;
+                            }
+                            0x31 if d.len() >= 2 => {
+                                dist_since_clear_km = Some(u32::from(u16::from(d[0]) * 256 + u16::from(d[1])));
+                                got = true;
+                            }
+                            _ => {}
                         }
                     }
                 }
-                mark_probe(0x78, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x7A, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("017A", Duration::from_millis(1000)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x7A) {
-                        if d.len() >= 3 {
-                            let raw = u16::from(d[1]) * 256 + u16::from(d[2]);
-                            dpf_diff_kpa = Some((f64::from(raw) * 0.01 * 10.0).round() / 10.0);
-                            got = true;
-                        }
-                    }
+                mark_probe(pid, got, &mut supported, &mut probed_failures);
+                if slow_rot_idx == 0 {
+                    svc.live.lock().unwrap().supported_pids =
+                        supported.iter().map(|p| format!("01{p:02X}")).collect();
                 }
-                mark_probe(0x7A, got, &mut supported, &mut probed_failures);
+                break;
             }
-            if should_poll(0x1F, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("011F", Duration::from_millis(900)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x1F) {
-                        if d.len() >= 2 {
-                            runtime_s = Some(u32::from(u16::from(d[0]) * 256 + u16::from(d[1])));
-                            got = true;
-                        }
-                    }
+        }
+
+        // Fiat MultiJet UDS Mode 22 DPF & Oil probe (explicit ATSP7 29-bit FCA -> 18DA10F1,
+        // fallback 11-bit 7E0; every 30 s, stops after 3 misses).
+        if uds_dpf_failures < 3 && last_uds.elapsed() >= Duration::from_secs(30) {
+            last_uds = Instant::now();
+            let verbose = uds_probe_count == 0;
+            uds_probe_count = uds_probe_count.saturating_add(1);
+
+            let modes: &[bool] = match uds_use_29 {
+                Some(true) => &[true],
+                Some(false) => &[false],
+                None => &[true, false],
+            };
+
+            let mut uds_ok = false;
+            for &try_29 in modes {
+                if try_29 {
+                    enter_fca_uds_29bit(svc, transport, verbose);
+                } else {
+                    enter_uds_11bit(svc, transport, verbose);
                 }
-                mark_probe(0x1F, got, &mut supported, &mut probed_failures);
-            }
-            if should_poll(0x31, &supported, &probed_failures) {
-                let mut got = false;
-                if let Ok(r) = transport.send_command("0131", Duration::from_millis(900)) {
-                    if let Some(d) = parse_mode01_bytes(&r, 0x31) {
-                        if d.len() >= 2 {
-                            dist_since_clear_km = Some(u32::from(u16::from(d[0]) * 256 + u16::from(d[1])));
-                            got = true;
-                        }
+
+                // 1. DPF Soot % (18E4 primary, 18E3 fallback)
+                for (hi, lo) in [(0x18u8, 0xE4u8), (0x18, 0xE3)] {
+                    if dpf_soot_pct.is_some() {
+                        break;
                     }
-                }
-                mark_probe(0x31, got, &mut supported, &mut probed_failures);
-            }
-            // Safe Fiat MultiJet UDS Mode 22 DPF probe (every 25 s; stops after 2 misses).
-            if uds_dpf_failures < 2 && last_uds.elapsed() >= Duration::from_secs(25) {
-                last_uds = Instant::now();
-                let mut uds_ok = false;
-                let ecu_hdr = if is_29bit_can { "ATSHDA10F1" } else { "ATSH7E0" };
-                let def_hdr = if is_29bit_can { "ATSHDB33F1" } else { "ATSH7DF" };
-                if transport.send_command(ecu_hdr, Duration::from_millis(700)).is_ok() {
-                    if let Ok(r) = transport.send_command("2218E4", Duration::from_millis(1200)) {
-                        if let Some(d) = parse_uds_22(&r, 0x18, 0xE4) {
+                    let cmd = format!("22{hi:02X}{lo:02X}");
+                    if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(1100)) {
+                        if verbose {
+                            push_log(svc, format!("FAP {cmd} ({}) -> {}", if try_29 { "29b" } else { "11b" }, summarize_elm_raw(&r)));
+                        }
+                        if let Some(d) = parse_uds_22(&r, hi, lo) {
                             if d.len() >= 2 {
                                 let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
                                 let pct = ((f64::from(raw) * 1000.0 / 65535.0) * 10.0).round() / 10.0;
@@ -2521,33 +2641,90 @@ fn run_elm_session(
                                     dpf_soot_pct = Some(pct);
                                     uds_ok = true;
                                 }
+                            } else if !d.is_empty() {
+                                let pct = f64::from(d[0]);
+                                if (0.0..=150.0).contains(&pct) {
+                                    dpf_soot_pct = Some(pct);
+                                    uds_ok = true;
+                                }
                             }
                         }
                     }
-                    if dpf_temp_c.is_none() {
-                        if let Ok(r) = transport.send_command("2218DE", Duration::from_millis(1200)) {
-                            if let Some(d) = parse_uds_22(&r, 0x18, 0xDE) {
-                                if d.len() >= 2 {
-                                    let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
-                                    let c = (f64::from(raw) * 0.02 - 40.0).round();
-                                    if (-40.0..=1100.0).contains(&c) {
-                                        dpf_temp_c = Some(c);
-                                        uds_ok = true;
+                }
+
+                // 2. DPF Temperature °C (18DE primary, 18DF fallback)
+                for (hi, lo) in [(0x18u8, 0xDEu8), (0x18, 0xDF)] {
+                    if dpf_temp_c.is_some() {
+                        break;
+                    }
+                    let cmd = format!("22{hi:02X}{lo:02X}");
+                    if let Ok(r) = transport.send_command(&cmd, Duration::from_millis(1100)) {
+                        if verbose {
+                            push_log(svc, format!("FAP {cmd} ({}) -> {}", if try_29 { "29b" } else { "11b" }, summarize_elm_raw(&r)));
+                        }
+                        if let Some(d) = parse_uds_22(&r, hi, lo) {
+                            if d.len() >= 2 {
+                                let raw = u16::from(d[0]) * 256 + u16::from(d[1]);
+                                let c = (f64::from(raw) * 0.02 - 40.0).round();
+                                if (-40.0..=1100.0).contains(&c) {
+                                    dpf_temp_c = Some(c);
+                                    uds_ok = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. DPF Diff Pressure (18E0, mbar -> kPa) & Oil Temp (194F) when UDS link responded
+                if uds_ok {
+                    if let Ok(r) = transport.send_command("2218E0", Duration::from_millis(1000)) {
+                        if let Some(d) = parse_uds_22(&r, 0x18, 0xE0) {
+                            if let Some(raw) = uds_i16(&d) {
+                                let mbar = f64::from(raw);
+                                if (-50.0..=1200.0).contains(&mbar) {
+                                    dpf_diff_kpa = Some((mbar * 0.1 * 10.0).round() / 10.0);
+                                }
+                            }
+                        }
+                    }
+                    if !supported.contains(&0x5C) {
+                        if let Ok(r) = transport.send_command("22194F", Duration::from_millis(1000)) {
+                            if let Some(d) = parse_uds_22(&r, 0x19, 0x4F) {
+                                if let Some(raw) = uds_u16(&d) {
+                                    let v1 = (f64::from(raw) * 0.02 - 40.0).round();
+                                    let v2 = (f64::from(raw) * 0.1 - 40.0).round();
+                                    if (-20.0..=155.0).contains(&v1) {
+                                        oil = Some(v1);
+                                    } else if (-20.0..=155.0).contains(&v2) {
+                                        oil = Some(v2);
                                     }
                                 }
                             }
                         }
                     }
-                    let _ = transport.send_command(def_hdr, Duration::from_millis(700));
-                }
-                if uds_ok {
-                    uds_dpf_failures = 0;
-                } else {
-                    uds_dpf_failures = uds_dpf_failures.saturating_add(1);
+                    uds_use_29 = Some(try_29);
+                    break;
                 }
             }
-            svc.live.lock().unwrap().supported_pids =
-                supported.iter().map(|p| format!("01{p:02X}")).collect();
+            restore_obd_standard(transport, is_29bit_can);
+
+            if uds_ok {
+                uds_dpf_failures = 0;
+                if verbose {
+                    push_log(
+                        svc,
+                        format!(
+                            "FAP UDS actif ({}): suie={:?}% temp={:?}°C",
+                            if uds_use_29 == Some(true) { "29b FCA" } else { "11b" },
+                            dpf_soot_pct,
+                            dpf_temp_c
+                        ),
+                    );
+                }
+            } else {
+                uds_dpf_failures = uds_dpf_failures.saturating_add(1);
+                push_log(svc, format!("FAP UDS sans réponse (essai {uds_dpf_failures}/3)"));
+            }
         }
 
         if ok_this_cycle {
@@ -2720,23 +2897,58 @@ fn run_elm_session(
             write_dashboard_obd_snapshot(&live);
         }
 
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(15));
     }
 }
 
 #[cfg(target_os = "linux")]
-fn read_all_dtcs(transport: &mut dyn ElmTransport) -> Vec<DtcCode> {
+fn read_all_dtcs(
+    svc: &Arc<ObdService>,
+    transport: &mut dyn ElmTransport,
+    default_29bit: bool,
+) -> Vec<DtcCode> {
     let mut all = Vec::new();
-    if let Ok(r) = transport.send_command("03", Duration::from_millis(2000)) {
-        all.extend(parse_dtcs(&r, 0x43, false));
+    match transport.send_command("03", Duration::from_millis(2000)) {
+        Ok(r) => {
+            let found = parse_dtcs(&r, 0x43, false);
+            push_log(
+                svc,
+                format!("DTC Mode 03 -> {} ({} confirmés)", summarize_elm_raw(&r), found.len()),
+            );
+            all.extend(found);
+        }
+        Err(e) => push_log(svc, format!("DTC Mode 03 -> ERR {e}")),
     }
-    if let Ok(r) = transport.send_command("07", Duration::from_millis(2000)) {
-        for dtc in parse_dtcs(&r, 0x47, true) {
+    match transport.send_command("07", Duration::from_millis(2000)) {
+        Ok(r) => {
+            let found = parse_dtcs(&r, 0x47, true);
+            push_log(
+                svc,
+                format!("DTC Mode 07 -> {} ({} en attente)", summarize_elm_raw(&r), found.len()),
+            );
+            for dtc in found {
+                if !all.iter().any(|existing| existing.code == dtc.code) {
+                    all.push(dtc);
+                }
+            }
+        }
+        Err(e) => push_log(svc, format!("DTC Mode 07 -> ERR {e}")),
+    }
+    // Also read Fiat/FCA 29-bit UDS Service 19 02 0F (catches manufacturer DTCs even if MIL is off)
+    enter_fca_uds_29bit(svc, transport, false);
+    if let Ok(r) = transport.send_command("19020F", Duration::from_millis(1800)) {
+        let uds_found = parse_uds_1902(&r);
+        push_log(
+            svc,
+            format!("DTC UDS 19020F -> {} ({} codes)", summarize_elm_raw(&r), uds_found.len()),
+        );
+        for dtc in uds_found {
             if !all.iter().any(|existing| existing.code == dtc.code) {
                 all.push(dtc);
             }
         }
     }
+    restore_obd_standard(transport, default_29bit);
     all
 }
 
@@ -2902,15 +3114,15 @@ mod bt_linux {
         }
 
         fn send_command(&mut self, cmd: &str, timeout: Duration) -> Result<String, String> {
-            // Drain any stale notifications before writing.
-            let _ = self.conn.process(Duration::from_millis(5));
+            // Drain any stale notifications non-blockingly before writing.
+            let _ = self.conn.process(Duration::from_millis(0));
             self.rx_buf.lock().unwrap().clear();
 
             self.write_raw(format!("{cmd}\r").into_bytes())?;
 
             let deadline = Instant::now() + timeout;
             loop {
-                let _ = self.conn.process(Duration::from_millis(35));
+                let _ = self.conn.process(Duration::from_millis(15));
                 {
                     let guard = self.rx_buf.lock().unwrap();
                     if guard.contains(&b'>') || guard.len() > 4096 {
@@ -3300,5 +3512,13 @@ mod tests {
 
         let vin = parse_vin("014\r\n0: 49 02 01 5A 46 41\r\n1: 33 35 36 30 30 30 30\r\n2: 31 32 33 34 35 36 37\r\n>").unwrap();
         assert_eq!(vin, "ZFA35600001234567");
+
+        // UDS Service 19 02 (59 02 FF <P1206 FTB=00 status=09 confirmed> <P0401 FTB=11 status=04 pending>)
+        let uds_dtcs = parse_uds_1902("00B\r\n0: 59 02 FF 12 06 00\r\n1: 09 04 01 11 04 00 00\r\n>");
+        assert_eq!(uds_dtcs.len(), 2);
+        assert_eq!(uds_dtcs[0].code, "P1206");
+        assert!(!uds_dtcs[0].pending);
+        assert_eq!(uds_dtcs[1].code, "P0401");
+        assert!(uds_dtcs[1].pending);
     }
 }

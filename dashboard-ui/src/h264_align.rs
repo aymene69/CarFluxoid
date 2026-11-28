@@ -394,7 +394,8 @@ pub fn align_h264(raw_x264: &[u8], target_config: &[u8]) -> Result<Vec<u8>, Alig
 
     let mut src_sps = None;
     let mut src_pps = None;
-    let mut out = Vec::with_capacity(raw_x264.len() + target_config.len() * 2);
+    let mut first_idr: Option<&[u8]> = None;
+    let mut out = Vec::with_capacity(raw_x264.len() * 2 + target_config.len() * 2);
     let mut count = 0u32;
 
     for nal in iter_nals(raw_x264) {
@@ -418,6 +419,9 @@ pub fn align_h264(raw_x264: &[u8], target_config: &[u8]) -> Result<Vec<u8>, Alig
                 {
                     return Err(AlignError("PPS coding flags differ from CarPlay config".into()));
                 }
+                if first_idr.is_none() {
+                    first_idr = Some(nal);
+                }
                 let rewritten = rewrite_idr(nal, ss, sp, dst_sps, dst_pps, count % 2)?;
                 out.extend_from_slice(target_config);
                 out.extend_from_slice(&[0, 0, 0, 1]);
@@ -428,9 +432,19 @@ pub fn align_h264(raw_x264: &[u8], target_config: &[u8]) -> Result<Vec<u8>, Alig
         }
     }
 
+    if count == 1 {
+        if let (Some(nal), Some(ss), Some(sp)) = (first_idr, src_sps, src_pps) {
+            let rewritten = rewrite_idr(nal, ss, sp, dst_sps, dst_pps, 1)?;
+            out.extend_from_slice(target_config);
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(&rewritten);
+            count = 2;
+        }
+    }
+
     if count < 2 {
         return Err(AlignError(format!(
-            "expected at least 2 IDR pictures, got {count}"
+            "expected at least 1 IDR picture, got {count}"
         )));
     }
     Ok(out)

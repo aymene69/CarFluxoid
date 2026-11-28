@@ -1200,7 +1200,7 @@ static int dashboard_refresh(struct dashboard_picture *picture,const char *name)
  free(picture->video);
  picture->video=image;picture->stamp=st;picture->units=units;
  for(int i=0;i<units;i++){picture->offsets[i]=offsets[i];picture->lengths[i]=lengths[i];}
- picture->changed=1;picture->next=0;
+ picture->changed=1;picture->next%=units;
  return 1;
 }
 static int send_video(int ch,const unsigned char *data,size_t length,uint64_t stamp,uint64_t start){
@@ -1664,7 +1664,7 @@ int main(int argc,char **argv){
     if(sent&&(frames<=5||!(frames%50)))session_trace("TX video n=%d bytes=%zu unacked=%d src=waiting unit=%d",frames,waiting_unit_len[unit],unacked,unit);
    }
   }
-  fd_set set;FD_ZERO(&set);FD_SET(fd,&set);struct timeval wait={0,screen==PROJECTION_MENU?40000:100000};
+  fd_set set;FD_ZERO(&set);FD_SET(fd,&set);struct timeval wait={0,screen==PROJECTION_MENU?15000:100000};
   if(!mbedtls_ssl_get_bytes_avail(&ssl)&&!left){
    if(!(usb_mode&&usb_pos<usb_len)){
     int max_fd=fd;if(control_fd>=0){FD_SET(control_fd,&set);if(control_fd>max_fd)max_fd=control_fd;}int video_fd=live_peer>=0?live_peer:live_listener;

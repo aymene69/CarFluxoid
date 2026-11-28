@@ -175,6 +175,8 @@ fn read_logs(query:&str)->String{
  let (label,path)=match which {
   "current"=>("car-diag.log",diag_dir().join("car-diag.log")),
   "session"=>("session.log",bridge_dir().join("session.log")),
+  "web"=>("carfluxoid-web.log",PathBuf::from("/var/log/carfluxoid-web.log")),
+  "dashboard"=>("carfluxoid-dashboard.log",PathBuf::from("/var/log/carfluxoid-dashboard.log")),
   _=>("car-diag.prev.log",diag_dir().join("car-diag.prev.log")),
  };
  read_tail(&path,MAX_LOG_BYTES).unwrap_or_else(||format!("Aucun log disponible pour {label} ({}).\n",path.display()))
